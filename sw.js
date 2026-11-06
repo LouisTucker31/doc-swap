@@ -4,7 +4,7 @@
      fetched fresh when you're online, so pushing to GitHub is enough. Just reopen the app,
      or tap "Check for updates" in the footer.
    - If you change a library or icon file, also bump VERSION so the saved copies are replaced. */
-const VERSION = 'docswap-v3';
+const VERSION = 'docswap-v4';
 
 const CORE = ['./', './index.html', './app.js', './styles.css', './manifest.webmanifest'];
 const ASSETS = [
@@ -24,9 +24,16 @@ const ASSETS = [
   './pdf-lib.min.js',
   './jszip.min.js',
   './heic2any.min.js',
-  './mammoth.browser.min.js',
-  './html2pdf.bundle.min.js',
-  './xlsx.full.min.js'
+  './xlsx.full.min.js',
+  './mediabunny.min.js',
+  './gifenc.min.js',
+  './qrcode.js',
+  './jsbarcode.min.js',
+  './tf.min.js',
+  './upscale-x2.json',
+  './upscale-x2.bin',
+  './upscale-x4.json',
+  './upscale-x4.bin'
 ];
 const CORE_PATHS = new Set(CORE.map(p => new URL(p, self.location).pathname));
 

@@ -2,7 +2,7 @@
    DOC SWAP — app.js
    All files live in the same folder as index.html.
    ========================================================= */
-const APP_VERSION = '3';
+const APP_VERSION = '4';
 
 /* =========================================================
    LIBRARIES — bundled next to index.html, loaded only when a tool needs them
@@ -12,9 +12,12 @@ const LIB = {
   pdflib:   'pdf-lib.min.js',
   zip:      'jszip.min.js',
   heic:     'heic2any.min.js',
-  mammoth:  'mammoth.browser.min.js',
-  html2pdf: 'html2pdf.bundle.min.js',
-  xlsx:     'xlsx.full.min.js'
+  xlsx:     'xlsx.full.min.js',
+  media:    'mediabunny.min.js',   // video & audio (uses the device's built-in codecs)
+  gif:      'gifenc.min.js',
+  qr:       'qrcode.js',
+  barcode:  'jsbarcode.min.js',
+  tf:       'tf.min.js'            // AI upscaler
 };
 const PDFJS_WORKER = 'pdf.worker.min.js';
 const _loading = {};
@@ -149,6 +152,8 @@ function outType(f){
   if(e === 'webp') return 'image/webp';
   return 'image/jpeg';
 }
+/* Works for normal and offscreen canvases (video frames can be either) */
+const anyCanvasToBlob = (c, type, q) => c.convertToBlob ? c.convertToBlob({type, quality: q}) : canvasToBlob(c, type, q);
 async function saveCanvas(c, f, suffix, type = outType(f)){
   const blob = await canvasToBlob(c, type, .92);
   return {blob, name: `${baseName(f.name)}${suffix}.${EXT_FOR[blob.type] || 'png'}`};
@@ -278,7 +283,7 @@ function parsePageList(str, n){
   return out;
 }
 
-/* Text extraction shared by PDF → Word and PDF → Text */
+/* Text extraction for PDF → Text */
 async function extractPdfText(f, p){
   await need('pdfjs');
   const pdf = await openPdfjs(f);
@@ -308,29 +313,6 @@ async function extractPdfText(f, p){
   }
   if(!any) throw new Error('No selectable text found. This PDF is probably a scanned image.');
   return pages;
-}
-
-/* Minimal .docx writer (used by PDF → Word, currently disabled) */
-async function buildDocx(pages){
-  await need('zip');
-  const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
-  const x = s => s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  let body = '';
-  pages.forEach((paras, i) => {
-    if(i > 0) body += '<w:p><w:r><w:br w:type="page"/></w:r></w:p>';
-    for(const pa of paras){
-      const text = pa.join(' ').replace(/(\w)- (\w)/g, '$1$2').replace(/\s+/g, ' ').trim();
-      body += `<w:p><w:r><w:t xml:space="preserve">${x(text)}</w:t></w:r></w:p>`;
-    }
-  });
-  const head = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
-  const zip = new JSZip();
-  zip.file('[Content_Types].xml', head + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>');
-  zip.file('_rels/.rels', head + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
-  zip.file('word/_rels/document.xml.rels', head + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>');
-  zip.file('word/styles.xml', head + `<w:styles xmlns:w="${W}"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:cs="Calibri"/><w:sz w:val="22"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="160" w:line="276" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults></w:styles>`);
-  zip.file('word/document.xml', head + `<w:document xmlns:w="${W}"><w:body>${body}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/></w:sectPr></w:body></w:document>`);
-  return zip.generateAsync({type: 'blob', mimeType: MIME.docx});
 }
 
 /* Word-wrap plain text to a width, for Text → PDF */
@@ -384,6 +366,197 @@ function jsonToSheet(data){
   return XLSX.utils.aoa_to_sheet([[flat(data)]]);
 }
 
+/* ---------- long jobs: cancelling ---------- */
+class Cancelled extends Error { constructor(){ super('Cancelled.'); this.cancelled = true; } }
+const checkCancel = ctl => { if(ctl && ctl.cancelled) throw new Cancelled(); };
+const fmtDur = s => { s = Math.max(0, Math.round(s)); const m = Math.floor(s / 60), r = s % 60; return m ? `${m} min ${String(r).padStart(2, '0')} s` : `${r} s`; };
+const even = n => Math.max(2, Math.round(n / 2) * 2);
+function parseTime(str){            // "90", "1:30", "1m30s" → seconds
+  const s = String(str || '').trim(); if(!s) return 0;
+  if(/^\d+(\.\d+)?$/.test(s)) return +s;
+  const c = s.match(/^(?:(\d+):)?(\d+):(\d+(?:\.\d+)?)$/); if(c) return (+(c[1] || 0)) * 3600 + (+c[2]) * 60 + (+c[3]);
+  const h = s.match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/i); if(h && (h[1] || h[2] || h[3])) return (+(h[1] || 0)) * 3600 + (+(h[2] || 0)) * 60 + (+(h[3] || 0));
+  throw new Error(`“${s}” isn’t a valid time. Use seconds (90) or minutes:seconds (1:30).`);
+}
+
+/* ---------- video & audio (Mediabunny + the device's built-in WebCodecs) ---------- */
+const VIDEO_EXTS = ['mp4','mov','m4v','webm','mkv','ts'];
+const AUDIO_EXTS = ['mp3','m4a','aac','wav','ogg','oga','opus','flac'];
+let mp3Ready = false;
+async function media(){
+  await need('media');
+  if(typeof VideoEncoder === 'undefined' && typeof AudioDecoder === 'undefined')
+    throw new Error('This browser can’t process video or audio. Update iOS, or try Safari or Chrome on your computer.');
+  if(!mp3Ready){ registerMp3Encoder(); mp3Ready = true; }
+  return Mediabunny;
+}
+async function openMedia(f){
+  const M = await media();
+  const input = new M.Input({source: new M.BlobSource(f), formats: M.ALL_FORMATS});
+  try{ await input.getFormat(); }
+  catch{ throw new Error(`Couldn’t read “${f.name}”. This format isn’t supported, or the file is damaged.`); }
+  return input;
+}
+const WHY = {
+  undecodable_source_codec: 'this device can’t read its format',
+  no_encodable_target_codec: 'this device can’t create that format',
+  unknown_source_codec: 'its format isn’t recognised',
+  cannot_copy: 'it can’t be copied into that format',
+  max_track_count_reached: 'too many tracks',
+  max_track_count_of_type_reached: 'too many tracks'
+};
+async function convertMedia({input, format, video, audio, p, ctl, label, needs}){
+  const M = Mediabunny;
+  const output = new M.Output({format, target: new M.BufferTarget()});
+  const conv = await M.Conversion.init({input, output, video, audio, showWarnings: false});
+  const lost = conv.discardedTracks.filter(d => d.reason !== 'discarded_by_user');
+  const used = conv.utilizedTracks.map(t => t.type);
+  if(!conv.isValid || (needs && !used.includes(needs))){
+    const d = lost.find(x => !needs || x.track.type === needs) || lost[0];
+    throw new Error(`This file can’t be converted on this device${d ? `: the ${d.track.type} — ${WHY[d.reason] || d.reason}` : ''}.`);
+  }
+  if(ctl) ctl.onCancel(() => conv.cancel());
+  conv.onProgress = v => p(v, label);
+  try{ await conv.execute(); }
+  catch(e){ if(ctl && ctl.cancelled) throw new Cancelled(); throw e; }
+  return {blob: new Blob([output.target.buffer], {type: format.mimeType}), lost};
+}
+function lostNote(lost){
+  const a = lost.find(d => d.track.type === 'audio');
+  return a ? `The sound was left out because ${WHY[a.reason] || 'it couldn’t be converted'} on this device.` : '';
+}
+function gainSample(s, g){
+  const M = Mediabunny, n = s.numberOfChannels, frames = s.numberOfFrames, data = new Float32Array(n * frames), plane = new Float32Array(frames);
+  for(let c = 0; c < n; c++){
+    s.copyTo(plane, {planeIndex: c, format: 'f32-planar'});
+    for(let i = 0; i < frames; i++){ const v = plane[i] * g; data[c * frames + i] = v > 1 ? 1 : v < -1 ? -1 : v; }
+  }
+  return new M.AudioSample({data, format: 'f32-planar', numberOfChannels: n, sampleRate: s.sampleRate, timestamp: s.timestamp});
+}
+
+/* ---------- AI upscaler (ESRGAN-slim model, TensorFlow.js) ---------- */
+const _models = {};
+async function upscaleCanvas(src, scale, p, ctl){
+  await need('tf');
+  try{ await tf.setBackend('webgl'); }catch{ await tf.setBackend('cpu'); }
+  await tf.ready();
+  p(0, 'Loading the AI model');
+  if(!_models[scale]){
+    try{ _models[scale] = await tf.loadLayersModel(`upscale-x${scale}.json`); }
+    catch{ throw new Error('Couldn’t load the AI model. Open Doc Swap once while online so it can save it for offline use.'); }
+  }
+  const model = _models[scale];
+  const W = src.width, H = src.height, T = 96, PAD = 8;
+  const sctx = src.getContext('2d', {willReadFrequently: true});
+  const out = document.createElement('canvas'); out.width = W * scale; out.height = H * scale;
+  const octx = out.getContext('2d');
+  const tiles = [];
+  for(let y = 0; y < H; y += T) for(let x = 0; x < W; x += T) tiles.push([x, y]);
+  for(const [k, [x0, y0]] of tiles.entries()){
+    checkCancel(ctl);
+    const rx = Math.max(0, x0 - PAD), ry = Math.max(0, y0 - PAD);
+    const rw = Math.min(W, x0 + T + PAD) - rx, rh = Math.min(H, y0 + T + PAD) - ry;
+    const region = sctx.getImageData(rx, ry, rw, rh);
+    const result = tf.tidy(() => {
+      const t = tf.browser.fromPixels(region).toFloat().expandDims(0);
+      return model.predict(t).squeeze().clipByValue(0, 255).round().toInt();
+    });
+    const px = await tf.browser.toPixels(result);
+    result.dispose();
+    const tileImg = new ImageData(px, rw * scale, rh * scale);
+    const tw = Math.min(T, W - x0) * scale, th = Math.min(T, H - y0) * scale;
+    // place only the centre of the tile (the padding just gives the model context at the edges)
+    octx.putImageData(tileImg, rx * scale, ry * scale, (x0 - rx) * scale, (y0 - ry) * scale, tw, th);
+    p((k + 1) / tiles.length, `Upscaling (${k + 1} of ${tiles.length} sections)`);
+    await tf.nextFrame();
+  }
+  return out;
+}
+function hasAlpha(c){
+  const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+  for(let i = 3; i < d.length; i += 4) if(d[i] < 255) return true;
+  return false;
+}
+
+/* ---------- codes & links ---------- */
+function qrMatrix(text, ecc = 'M'){
+  if(typeof qrcode.stringToBytesFuncs === 'object' && qrcode.stringToBytesFuncs['UTF-8']) qrcode.stringToBytes = qrcode.stringToBytesFuncs['UTF-8'];
+  const qr = qrcode(0, ecc);
+  qr.addData(text, 'Byte');
+  try{ qr.make(); }catch{ throw new Error('That’s too much text for a QR code. Shorten it, e.g. with the Link shortener.'); }
+  const n = qr.getModuleCount();
+  return {n, dark: (r, c) => qr.isDark(r, c)};
+}
+function qrSvg(m, fg, bg, quiet = 4){
+  const size = m.n + quiet * 2; let d = '';
+  for(let r = 0; r < m.n; r++) for(let c = 0; c < m.n; c++) if(m.dark(r, c)) d += `M${c + quiet} ${r + quiet}h1v1h-1z`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" shape-rendering="crispEdges">${bg ? `<rect width="${size}" height="${size}" fill="${bg}"/>` : ''}<path fill="${fg}" d="${d}"/></svg>`;
+}
+function qrCanvas(m, px, fg, bg, quiet = 4){
+  const mods = m.n + quiet * 2, s = Math.max(1, Math.floor(px / mods));
+  const c = document.createElement('canvas'); c.width = c.height = mods * s;
+  const ctx = c.getContext('2d');
+  if(bg){ ctx.fillStyle = bg; ctx.fillRect(0, 0, c.width, c.height); }
+  ctx.fillStyle = fg;
+  for(let r = 0; r < m.n; r++) for(let col = 0; col < m.n; col++) if(m.dark(r, col)) ctx.fillRect((col + quiet) * s, (r + quiet) * s, s, s);
+  return c;
+}
+const wifiEsc = s => String(s).replace(/([\\;,:"])/g, '\\$1');
+const cleanUrl = raw => {
+  let u; const s = String(raw || '').trim();
+  if(!s) throw new Error('Enter a link.');
+  try{ u = new URL(/^[a-z][a-z0-9+.-]*:/i.test(s) ? s : 'https://' + s); }catch{ throw new Error('That doesn’t look like a valid link.'); }
+  if(!/^https?:$/.test(u.protocol) || !u.hostname.includes('.')) throw new Error('Enter a full web link, e.g. https://example.com/page');
+  return u;
+};
+function parseMediaUrl(raw){
+  const u = cleanUrl(raw), host = u.hostname.replace(/^(www\.|m\.|music\.)/, '');
+  const t = u.searchParams.get('t') || u.searchParams.get('start') || (u.hash.match(/t=([\dhms]+)/) || [])[1];
+  let start = 0; try{ start = t ? parseTime(t) : 0; }catch{}
+  let id = null, vertical = false;
+  if(host === 'youtu.be') id = u.pathname.slice(1).split('/')[0];
+  else if(host === 'youtube.com' || host === 'youtube-nocookie.com'){
+    if(u.pathname === '/watch') id = u.searchParams.get('v');
+    else { const m = u.pathname.match(/^\/(embed|shorts|live|v)\/([\w-]{11})/); if(m){ id = m[2]; vertical = m[1] === 'shorts'; } }
+  }
+  if(id && /^[\w-]{11}$/.test(id)) return {kind: 'youtube', id, start, vertical};
+  if(host === 'vimeo.com' || host === 'player.vimeo.com'){
+    const m = u.pathname.match(/(?:\/video)?\/(\d+)(?:\/([\da-f]+))?/);
+    if(m) return {kind: 'vimeo', id: m[1], hash: m[2] || u.searchParams.get('h') || '', start};
+  }
+  const e = extOf(u.pathname);
+  if(['mp4','webm','mov','m4v','ogv'].includes(e)) return {kind: 'video', src: u.href, start};
+  if(['mp3','m4a','wav','ogg','oga','aac','flac','opus'].includes(e)) return {kind: 'audio', src: u.href, start};
+  throw new Error('That link isn’t a YouTube or Vimeo video, or a direct link to a video or audio file (ending .mp4, .mp3 etc.).');
+}
+function jsonp(url, ms = 12000){
+  return new Promise((res, rej) => {
+    const cb = 'dsCb' + Date.now() + Math.random().toString(36).slice(2, 8), s = document.createElement('script');
+    const done = () => { delete window[cb]; s.remove(); clearTimeout(timer); };
+    window[cb] = d => { done(); res(d); };
+    s.onerror = () => { done(); rej(new Error('Couldn’t reach is.gd. Check you’re online and try again.')); };
+    const timer = setTimeout(() => { done(); rej(new Error('is.gd didn’t respond. Try again in a moment.')); }, ms);
+    s.src = url + '&callback=' + cb;
+    document.head.appendChild(s);
+  });
+}
+const b64utf8 = str => { const b = new TextEncoder().encode(str); let s = ''; for(let i = 0; i < b.length; i += 8192) s += String.fromCharCode(...b.subarray(i, i + 8192)); return btoa(s); };
+function redirectPage(url){
+  const a = escH(url), j = JSON.stringify(url).replace(/</g, '\\u003c');
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Redirecting…</title>
+<meta name="robots" content="noindex">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="0; url=${a}">
+<link rel="canonical" href="${a}">
+<script>location.replace(${j});</script>
+</head><body style="font-family:system-ui,sans-serif;padding:24px"><p>Redirecting to <a href="${a}">${a}</a>…</p></body></html>
+`;
+}
+const LINK_KEY = 'docswap.links';
+const linkPrefs = () => { try{ return JSON.parse(localStorage.getItem(LINK_KEY)) || {}; }catch{ return {}; } };
+
 /* =========================================================
    ICONS — tile graphics (original artwork)
    ========================================================= */
@@ -412,6 +585,16 @@ const G = {
   pin:'M0 4.6S-3.6 1-3.6-1.1a3.6 3.6 0 0 1 7.2 0C3.6 1 0 4.6 0 4.6zM0-1.1h0',
   out:'M0-4v7M-3 .2 0 3.2 3 .2'
 };
+Object.assign(C, {mp4:'#4f46e5', mov:'#64748b', mp3:'#c026d3', gif:'#65a30d', html:'#e8590c', url:'#0d9488'});
+Object.assign(G, {
+  play:'M-2-3.6v7.2l5.6-3.6z',
+  mute:'M-4.6-1.6h1.8l2.6-2.4v8l-2.6-2.4h-1.8zM1.6-1.6l3 3M4.6-1.6l-3 3',
+  sparkle:'M0-4.8 1.3-1.3 4.8 0 1.3 1.3 0 4.8-1.3 1.3-4.8 0-1.3-1.3z',
+  frames:'M-4.2-4.2h3.4v3.4h-3.4zM.8-4.2h3.4v3.4H.8zM-4.2.8h3.4v3.4h-3.4zM.8.8h3.4v3.4H.8z',
+  link:'M-1.2 1.2l2.4-2.4M-2.6-.4l-1 1a1.9 1.9 0 0 0 2.7 2.7l1-1M2.6.4l1-1a1.9 1.9 0 0 0-2.7-2.7l-1 1'
+});
+const qrIcon = `<svg viewBox="0 0 80 56" aria-hidden="true"><g transform="translate(22 10) scale(.98)" fill="var(--ink)"><path fill-rule="evenodd" d="M0 0h12v12H0zM2.5 2.5v7h7v-7zM4.5 4.5h3v3h-3zM24 0h12v12H24zM26.5 2.5v7h7v-7zM28.5 4.5h3v3h-3zM0 24h12v12H0zM2.5 26.5v7h7v-7zM4.5 28.5h3v3h-3z"/><path d="M15 0h3v3h-3zM15 6h3v4h-3zM20 3h2v3h-2zM15 15h4v3h-4zM21 15h3v6h-3zM27 15h4v3h-4zM33 15h3v5h-3zM0 15h4v3H0zM7 15h3v3H7zM15 21h3v4h-3zM27 21h3v3h-3zM24 27h5v3h-5zM32 24h4v4h-4zM15 28h3v8h-3zM21 31h4v5h-4zM30 32h6v4h-6z"/></g></svg>`;
+const barIcon = `<svg viewBox="0 0 80 56" aria-hidden="true"><g transform="translate(18 9)" fill="var(--ink)">${[[0,2],[3,1],[5,3],[9,1],[11,2],[14,1],[17,3],[21,1],[23,2],[26,1],[28,3],[32,1],[34,2],[38,1],[40,3]].map(([x, w]) => `<rect x="${x}" width="${w}" height="30"/>`).join('')}<rect y="34" width="43" height="3" rx="1.5" opacity=".35"/></g></svg>`;
 const conv = (a, ca, b, cb) => svg(doc(10, 4, a, ca) + doc(42, 16, b, cb) + badge(40, 30, G.arrow));
 const op = (label, c, glyph, fill, tilt) => svg((tilt ? `<g transform="rotate(-12 40 26)">${doc(24, 8, label, c)}</g>` : doc(24, 8, label, c)) + badge(54, 42, glyph, fill));
 const pair = (label, c, glyph) => svg(doc(8, 10, label, c) + doc(44, 10, label, c) + badge(40, 28, glyph));
@@ -876,7 +1059,7 @@ const TOOLS = [
   }
 },
 {
-  id:'favicon', name:'Favicon maker', cats:['images','files'], exts:[...IMG_EXTS, 'svg'], imageInput:true, verb:'Create icons',
+  id:'favicon', name:'Favicon maker', cats:['images','web'], exts:[...IMG_EXTS, 'svg'], imageInput:true, verb:'Create icons',
   desc:'Make a full website icon set from one image: favicon.ico, Apple and Android icons and the HTML to paste in.',
   note:'Use a square image of at least 512 px for the sharpest result. Non-square images are fitted, not cropped.',
   icon: conv('PNG', C.png, 'ICO', C.ico),
@@ -907,6 +1090,234 @@ const TOOLS = [
     res.push({blob: textBlob(snippet), name: 'favicon-html.txt', copy: snippet});
     res.note = 'Upload the files to your website’s root folder and paste the HTML into the <head>.';
     res.copyLabel = 'Copy HTML';
+    return res;
+  }
+},
+
+{
+  id:'upscale-image', name:'AI upscale', cats:['images'], exts:IMG_EXTS, imageInput:true, long:true, verb:'Upscale',
+  desc:'Make small or low-res images 2× or 4× bigger, with AI adding sharper detail. Runs entirely on your device.',
+  note:'Works best on graphics, logos, screenshots and small photos. Faces can look slightly smoothed.',
+  icon: op('IMG', C.img, G.sparkle, true),
+  options:[{key:'scale', label:'Upscale by', type:'select', value:'2', choices:[['2','2× (e.g. 800 px → 1600 px)'],['4','4× (e.g. 400 px → 1600 px)']]}],
+  async run(files, o, p, ctl){
+    const f = files[0], s = +o.scale;
+    const src = await imageToCanvas(f);
+    const W = src.width, H = src.height, max = s === 2 ? 2_600_000 : 900_000;
+    if(W * H > max){
+      const side = Math.floor(Math.sqrt(max) / 100) * 100;
+      throw new Error(`This image is ${W}×${H} px, which is too big to upscale ${s}× on a phone. Use one up to about ${side}×${side} px (try Resize image first)${s === 4 ? ', or choose 2×' : ''}.`);
+    }
+    let out = await upscaleCanvas(src, s, p, ctl);
+    if(hasAlpha(src)){
+      const a = scaleCanvas(src, out.width, out.height).getContext('2d').getImageData(0, 0, out.width, out.height).data;
+      const octx = out.getContext('2d'), im = octx.getImageData(0, 0, out.width, out.height);
+      for(let i = 3; i < im.data.length; i += 4) im.data[i] = a[i];
+      octx.putImageData(im, 0, 0);
+    }
+    p(1, 'Saving image');
+    const r = await saveCanvas(out, f, `-${s}x`);
+    const res = [{...r, from: f.size}];
+    res.note = `${W}×${H} → ${out.width}×${out.height} px`;
+    res.previewImg = r.blob;
+    return res;
+  }
+},
+
+/* ---------------- VIDEO & AUDIO ---------------- */
+{
+  id:'convert-video', name:'Convert video', cats:['video'], exts:VIDEO_EXTS, label:'MP4, MOV, WEBM, MKV', long:true,
+  desc:'Convert videos to MP4, MOV or WebM. iPhone MOV to MP4 is usually instant with no quality lost.',
+  icon: conv('MOV', C.mov, 'MP4', C.mp4),
+  options:[
+    {key:'to', label:'Convert to', type:'select', value:'mp4', choices:[['mp4','MP4 (plays everywhere)'],['mov','MOV (Apple)'],['webm','WebM (for websites)']]},
+    {key:'audio', label:'Sound', type:'select', value:'keep', choices:[['keep','Keep the sound'],['remove','Remove the sound']]}
+  ],
+  async run(files, o, p, ctl){
+    const f = files[0], input = await openMedia(f), M = Mediabunny;
+    const vt = await input.getPrimaryVideoTrack();
+    if(!vt) throw new Error('This file has no video in it. To convert sound, use the Audio converter.');
+    const format = o.to === 'webm' ? new M.WebMOutputFormat() : o.to === 'mov' ? new M.MovOutputFormat({fastStart: 'in-memory'}) : new M.Mp4OutputFormat({fastStart: 'in-memory'});
+    const supported = format.getSupportedCodecs();
+    const copy = !!vt.codec && supported.includes(vt.codec);
+    let video = {};
+    if(!copy){
+      if(!(await vt.canDecode())) throw new Error('This device can’t read the video format inside this file.');
+      const prefs = o.to === 'webm' ? ['vp9','vp8','av1'] : ['avc','hevc','av1','vp9'];
+      const codec = await M.getFirstEncodableVideoCodec(prefs.filter(c => supported.includes(c)), {width: even(vt.displayWidth), height: even(vt.displayHeight)});
+      if(!codec) throw new Error(`This device can’t create ${o.to.toUpperCase()} video. Try MP4 instead.`);
+      video = {codec, bitrate: M.QUALITY_HIGH};
+    }
+    const audio = o.audio === 'remove' ? {discard: true} : {};
+    const {blob, lost} = await convertMedia({input, format, video, audio, p, ctl, label: copy ? 'Repackaging' : 'Converting', needs: 'video'});
+    const res = [{blob, name: `${baseName(f.name)}${o.audio === 'remove' ? '-muted' : ''}.${format.fileExtension.replace(/^\./, '')}`, from: f.size}];
+    res.note = [copy ? 'Repackaged without re-encoding, so no quality was lost.' : 'Re-encoded into the new format.', o.audio === 'keep' ? lostNote(lost) : ''].filter(Boolean).join(' ');
+    return res;
+  }
+},
+{
+  id:'compress-video', name:'Compress video', cats:['video'], exts:VIDEO_EXTS, label:'MP4, MOV, WEBM, MKV', long:true, verb:'Compress',
+  desc:'Make videos smaller by lowering the resolution (e.g. 1080p to 720p), the quality, or both. Saves as MP4.',
+  icon: op('MP4', C.mp4, G.shrink),
+  options:[
+    {key:'res', label:'Resolution', type:'select', value:'720', choices:[['original','Keep the same size'],['1080','1080p (Full HD)'],['720','720p (HD)'],['480','480p (small)'],['up1080','1080p upscale (no extra detail)']]},
+    {key:'q', label:'Quality', type:'select', value:'medium', choices:[['high','High (bigger file)'],['medium','Balanced'],['low','Small file']]},
+    {key:'audio', label:'Sound', type:'select', value:'keep', choices:[['keep','Keep the sound'],['remove','Remove the sound']]}
+  ],
+  async run(files, o, p, ctl){
+    const f = files[0], input = await openMedia(f), M = Mediabunny;
+    const vt = await input.getPrimaryVideoTrack();
+    if(!vt) throw new Error('This file has no video in it.');
+    if(!(await vt.canDecode())) throw new Error('This device can’t read the video format inside this file.');
+    const W = vt.displayWidth, H = vt.displayHeight, short = Math.min(W, H);
+    let target = o.res === 'original' ? short : o.res === 'up1080' ? 1080 : +o.res, capped = false;
+    if(o.res !== 'up1080' && target > short){ target = short; capped = true; }
+    const sc = target / short, w = even(W * sc), h = even(H * sc);
+    const format = new M.Mp4OutputFormat({fastStart: 'in-memory'});
+    const codec = await M.getFirstEncodableVideoCodec(['avc','hevc','av1','vp9'].filter(c => format.getSupportedCodecs().includes(c)), {width: w, height: h});
+    if(!codec) throw new Error('This device can’t create MP4 video at that size. Try a smaller resolution.');
+    const bitrate = {high: M.QUALITY_HIGH, medium: M.QUALITY_MEDIUM, low: M.QUALITY_LOW}[o.q];
+    const {blob, lost} = await convertMedia({input, format, p, ctl, label: 'Compressing', needs: 'video',
+      video: {width: w, height: h, fit: 'fill', codec, bitrate, forceTranscode: true},
+      audio: o.audio === 'remove' ? {discard: true} : {}});
+    const res = [{blob, name: `${baseName(f.name)}-${Math.min(w, h)}p.mp4`, from: f.size}];
+    res.note = [`${W}×${H} → ${w}×${h}.`, capped ? 'The video was already smaller than that resolution, so its size was kept.' : '',
+      blob.size > f.size ? 'The file came out bigger than the original. Choose a lower quality or resolution.' : '', o.audio === 'keep' ? lostNote(lost) : ''].filter(Boolean).join(' ');
+    return res;
+  }
+},
+{
+  id:'mute-video', name:'Mute video', cats:['video'], multiple:true, exts:VIDEO_EXTS, label:'MP4, MOV, WEBM, MKV', long:true, verb:'Remove sound',
+  desc:'Remove the sound from videos. The picture isn’t re-encoded, so there’s no quality loss.',
+  icon: op('MP4', C.mp4, G.mute),
+  async run(files, o, p, ctl){
+    const M = await media(), res = [];
+    for(const [i, f] of files.entries()){
+      checkCancel(ctl);
+      const input = await openMedia(f), e = extOf(f.name);
+      const format = e === 'webm' ? new M.WebMOutputFormat() : e === 'mkv' ? new M.MkvOutputFormat() : e === 'mov' ? new M.MovOutputFormat({fastStart: 'in-memory'}) : new M.Mp4OutputFormat({fastStart: 'in-memory'});
+      const {blob} = await convertMedia({input, format, p: (v, l) => p((i + v) / files.length, l), ctl, label: `Removing sound from ${f.name}`, needs: 'video', video: {}, audio: {discard: true}});
+      res.push({blob, name: `${baseName(f.name)}-muted.${format.fileExtension.replace(/^\./, '')}`});
+    }
+    return res;
+  }
+},
+{
+  id:'audio-convert', name:'Audio converter', cats:['video'], multiple:true, exts:[...VIDEO_EXTS, ...AUDIO_EXTS], label:'videos or audio (MP4, MOV, MP3, M4A, WAV…)', long:true,
+  desc:'Pull the sound out of a video, or convert audio files, to MP3, M4A or WAV. You can also make it louder or quieter.',
+  icon: conv('MP4', C.mp4, 'MP3', C.mp3),
+  options:[
+    {key:'to', label:'Convert to', type:'select', value:'mp3', choices:[['mp3','MP3 (plays everywhere)'],['m4a','M4A / AAC (Apple, smaller)'],['wav','WAV (uncompressed, for editing)']]},
+    {key:'kbps', label:'Quality', type:'select', value:'192', choices:[['128','Standard (128 kbps)'],['192','High (192 kbps)'],['320','Best (320 kbps)']], showIf:['to', ['mp3','m4a']]},
+    {key:'volume', label:'Volume', type:'select', value:'100', choices:[['50','Quieter (50%)'],['75','A bit quieter (75%)'],['100','Unchanged'],['125','A bit louder (125%)'],['150','Louder (150%)'],['200','Much louder (200%)']]}
+  ],
+  async run(files, o, p, ctl){
+    const M = await media(), res = [], gain = +o.volume / 100;
+    for(const [i, f] of files.entries()){
+      checkCancel(ctl);
+      const input = await openMedia(f), at = await input.getPrimaryAudioTrack();
+      if(!at) throw new Error(`“${f.name}” has no sound in it.`);
+      let format, audio, type, ext;
+      if(o.to === 'mp3'){ format = new M.Mp3OutputFormat(); audio = {codec: 'mp3', bitrate: +o.kbps * 1000}; type = 'audio/mpeg'; ext = 'mp3'; }
+      else if(o.to === 'm4a'){
+        format = new M.Mp4OutputFormat({fastStart: 'in-memory'}); type = 'audio/mp4'; ext = 'm4a';
+        // already AAC (e.g. iPhone videos)? copy it straight across: instant and lossless
+        audio = at.codec === 'aac' && gain === 1 ? {codec: 'aac'} : {codec: 'aac', bitrate: +o.kbps * 1000};
+      }
+      else { format = new M.WavOutputFormat(); audio = {codec: 'pcm-s16'}; type = 'audio/wav'; ext = 'wav'; }
+      if(gain !== 1){ audio.process = s => gainSample(s, gain); audio.forceTranscode = true; }
+      let blob;
+      try{
+        ({blob} = await convertMedia({input, format, p: (v, l) => p((i + v) / files.length, l), ctl, label: `Converting ${f.name}`, needs: 'audio', video: {discard: true}, audio}));
+      }catch(e){
+        if(o.to === 'm4a' && !e.cancelled) throw new Error(`${e.message} This device may not be able to create M4A from this file. Choose MP3 instead.`);
+        throw e;
+      }
+      res.push({blob: new Blob([blob], {type}), name: `${baseName(f.name)}.${ext}`});
+    }
+    return res;
+  }
+},
+{
+  id:'video-frames', name:'Video to images', cats:['video','images'], exts:VIDEO_EXTS, label:'MP4, MOV, WEBM, MKV', long:true, verb:'Get images',
+  desc:'Save stills from a video, either one every few seconds or a single frame at the time you choose.',
+  icon: op('MP4', C.mp4, G.frames, true),
+  options:[
+    {key:'mode', label:'Which frames?', type:'select', value:'every', choices:[['every','One every few seconds'],['one','A single frame']]},
+    {key:'every', label:'Every', type:'select', value:'2', choices:[['1','1 second'],['2','2 seconds'],['5','5 seconds'],['10','10 seconds'],['30','30 seconds']], showIf:['mode','every']},
+    {key:'at', label:'Time (e.g. 0:12)', type:'text', value:'0:00', placeholder:'minutes:seconds', showIf:['mode','one']},
+    {key:'format', label:'Image format', type:'select', value:'image/jpeg', choices:[['image/jpeg','JPG'],['image/png','PNG']]}
+  ],
+  async run(files, o, p, ctl){
+    const f = files[0], input = await openMedia(f), M = Mediabunny;
+    const vt = await input.getPrimaryVideoTrack();
+    if(!vt) throw new Error('This file has no video in it.');
+    if(!(await vt.canDecode())) throw new Error('This device can’t read the video format inside this file.');
+    const dur = await vt.computeDuration(), first = await vt.getFirstTimestamp().catch(() => 0);
+    let times;
+    if(o.mode === 'one'){
+      const t = parseTime(o.at);
+      if(t > dur) throw new Error(`The video is only ${fmtDur(dur)} long.`);
+      times = [Math.min(first + t, first + dur - 0.001)];
+    } else {
+      const step = +o.every; times = [];
+      for(let t = 0; t < dur; t += step) times.push(first + t);
+      if(times.length > 300) throw new Error(`That would make ${times.length} images. Choose a longer gap.`);
+    }
+    const sink = new M.CanvasSink(vt), res = []; let k = 0;
+    for await (const wc of sink.canvasesAtTimestamps(times)){
+      checkCancel(ctl); k++;
+      p(k / times.length, `Saving frame ${k} of ${times.length}`);
+      if(!wc) continue;
+      const blob = await anyCanvasToBlob(wc.canvas, o.format, .92);
+      const ts = Math.max(0, wc.timestamp - first), mm = Math.floor(ts / 60), ss = Math.floor(ts % 60);
+      res.push({blob, name: `${baseName(f.name)}-${mm}m${String(ss).padStart(2, '0')}s.${EXT_FOR[blob.type] || 'png'}`});
+    }
+    if(!res.length) throw new Error('No frames could be read from this video.');
+    if(res.length === 1) res.previewImg = res[0].blob;
+    return res;
+  }
+},
+{
+  id:'video-gif', name:'Video to GIF', cats:['video','images'], exts:VIDEO_EXTS, label:'MP4, MOV, WEBM, MKV', long:true, verb:'Make GIF',
+  desc:'Turn a short part of a video into an animated GIF.',
+  note:'GIFs get big quickly. Short clips (3–10 seconds) at 480 px work best.',
+  icon: conv('MP4', C.mp4, 'GIF', C.gif),
+  options:[
+    {key:'start', label:'Start at (e.g. 0:05)', type:'text', value:'0:00', placeholder:'minutes:seconds'},
+    {key:'len', label:'Length', type:'select', value:'5', choices:[['3','3 seconds'],['5','5 seconds'],['10','10 seconds'],['15','15 seconds']]},
+    {key:'width', label:'Width', type:'select', value:'480', choices:[['320','320 px (small)'],['480','480 px'],['640','640 px (large file)']]},
+    {key:'fps', label:'Smoothness', type:'select', value:'12', choices:[['8','Choppy (8 fps, smallest)'],['12','Normal (12 fps)'],['15','Smooth (15 fps)']]}
+  ],
+  async run(files, o, p, ctl){
+    const f = files[0], input = await openMedia(f), M = Mediabunny;
+    await need('gif');
+    const vt = await input.getPrimaryVideoTrack();
+    if(!vt) throw new Error('This file has no video in it.');
+    if(!(await vt.canDecode())) throw new Error('This device can’t read the video format inside this file.');
+    const dur = await vt.computeDuration(), first = await vt.getFirstTimestamp().catch(() => 0);
+    const start = parseTime(o.start);
+    if(start >= dur) throw new Error(`The video is only ${fmtDur(dur)} long.`);
+    const end = Math.min(dur, start + +o.len), fps = +o.fps, times = [];
+    for(let t = start; t < end; t += 1 / fps) times.push(first + t);
+    const gw = Math.min(+o.width, even(vt.displayWidth));
+    const sink = new M.CanvasSink(vt, {width: gw});
+    const gif = gifenc.GIFEncoder(); let k = 0, gh = 0;
+    for await (const wc of sink.canvasesAtTimestamps(times)){
+      checkCancel(ctl); k++;
+      p(k / times.length, `Adding frame ${k} of ${times.length}`);
+      if(!wc) continue;
+      const c = wc.canvas, data = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+      const palette = gifenc.quantize(data, 256), index = gifenc.applyPalette(data, palette);
+      gif.writeFrame(index, c.width, c.height, {palette, delay: Math.round(1000 / fps)});
+      gh = c.height;
+      if(k % 4 === 0) await tick();
+    }
+    gif.finish();
+    const blob = new Blob([gif.bytes()], {type: 'image/gif'});
+    const res = [{blob, name: `${baseName(f.name)}.gif`}];
+    res.note = `${gw}×${gh} px, ${(end - start).toFixed(1).replace(/\.0$/, '')} seconds, ${k} frames`;
+    res.previewImg = blob;
     return res;
   }
 },
@@ -1015,6 +1426,208 @@ const TOOLS = [
   }
 },
 
+/* ---------------- WEB & LINKS ---------------- */
+{
+  id:'qr-code', name:'QR code maker', cats:['web'], noFile:true, verb:'Create QR code',
+  desc:'Make a QR code for a link, some text, a Wi‑Fi network, an email address or a phone number.',
+  icon: qrIcon,
+  options:[
+    {key:'type', label:'QR code for', type:'select', value:'url', choices:[['url','A link'],['text','Some text'],['wifi','Wi‑Fi network (scan to join)'],['email','Email'],['phone','Phone number']]},
+    {key:'url', label:'Link', type:'text', inputType:'url', value:'', placeholder:'https://example.com', showIf:['type','url']},
+    {key:'text', label:'Text', type:'text', value:'', placeholder:'Anything you like', showIf:['type','text']},
+    {key:'ssid', label:'Wi‑Fi network name', type:'text', value:'', placeholder:'Network name', showIf:['type','wifi']},
+    {key:'pass', label:'Wi‑Fi password', type:'text', value:'', placeholder:'Password', showIf:['type','wifi']},
+    {key:'sec', label:'Security', type:'select', value:'WPA', choices:[['WPA','WPA/WPA2/WPA3 (most)'],['WEP','WEP (old)'],['nopass','No password']], showIf:['type','wifi']},
+    {key:'email', label:'Email address', type:'text', inputType:'email', value:'', placeholder:'name@example.com', showIf:['type','email']},
+    {key:'subject', label:'Subject (optional)', type:'text', value:'', showIf:['type','email']},
+    {key:'phone', label:'Phone number', type:'text', inputType:'tel', value:'', placeholder:'+44 7700 900123', showIf:['type','phone']},
+    {key:'color', label:'Colour', type:'select', value:'#000000', choices:[['#000000','Black'],['#1e293b','Dark slate'],['#1d4ed8','Blue'],['#15803d','Green'],['#b91c1c','Red']]},
+    {key:'bg', label:'Background', type:'select', value:'#ffffff', choices:[['#ffffff','White'],['','Transparent']]},
+    {key:'size', label:'Image size', type:'select', value:'1024', choices:[['512','Small (512 px)'],['1024','Medium (1024 px)'],['2048','Large (2048 px, for print)']]}
+  ],
+  async run(files, o, p){
+    let text, about;
+    if(o.type === 'url'){ text = cleanUrl(o.url).href; about = `Opens ${text}`; }
+    else if(o.type === 'text'){ text = o.text.trim(); if(!text) throw new Error('Enter some text.'); about = 'Shows your text'; }
+    else if(o.type === 'wifi'){
+      if(!o.ssid.trim()) throw new Error('Enter the Wi‑Fi network name.');
+      if(o.sec !== 'nopass' && !o.pass) throw new Error('Enter the Wi‑Fi password, or choose “No password”.');
+      text = `WIFI:T:${o.sec};S:${wifiEsc(o.ssid.trim())};${o.sec !== 'nopass' ? `P:${wifiEsc(o.pass)};` : ''};`;
+      about = `Joins the “${o.ssid.trim()}” Wi‑Fi network`;
+    }
+    else if(o.type === 'email'){
+      const e = o.email.trim(); if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) throw new Error('Enter a valid email address.');
+      text = `mailto:${e}${o.subject.trim() ? `?subject=${encodeURIComponent(o.subject.trim())}` : ''}`; about = `Starts an email to ${e}`;
+    }
+    else {
+      const n = o.phone.replace(/[^\d+]/g, ''); if(n.replace('+', '').length < 5) throw new Error('Enter a valid phone number.');
+      text = `tel:${n}`; about = `Calls ${n}`;
+    }
+    await need('qr');
+    const m = qrMatrix(text, 'M'), bg = o.bg || null;
+    p(.5, 'Drawing QR code');
+    const png = await canvasToBlob(qrCanvas(m, +o.size, o.color, bg), 'image/png');
+    const svgBlob = new Blob([qrSvg(m, o.color, bg)], {type: 'image/svg+xml'});
+    const res = [{blob: png, name: 'qr-code.png'}, {blob: svgBlob, name: 'qr-code.svg'}];
+    res.previewImg = png; res.previewBg = !bg;
+    res.note = `${about}. PNG for everyday use, SVG for print and design apps (stays sharp at any size). Always test-scan before printing.`;
+    return res;
+  }
+},
+{
+  id:'barcode', name:'Barcode maker', cats:['web'], noFile:true, verb:'Create barcode',
+  desc:'Make product, shipping or general-purpose barcodes as PNG and SVG.',
+  icon: barIcon,
+  options:[
+    {key:'format', label:'Barcode type', type:'select', value:'CODE128', choices:[['CODE128','Code 128 (most common)'],['EAN13','EAN-13 (UK/EU products)'],['UPC','UPC-A (US products)'],['EAN8','EAN-8 (small products)'],['CODE39','Code 39 (A–Z, 0–9)'],['ITF14','ITF-14 (shipping cartons)']]},
+    {key:'value', label:'Value', type:'text', value:'', placeholder:'e.g. DS-12345'},
+    {key:'text', label:'Show the value under the bars?', type:'select', value:'yes', choices:[['yes','Yes'],['no','No']]}
+  ],
+  hint:'For EAN, UPC and ITF you can leave off the last digit. It’s a check digit and is worked out for you.',
+  async run(files, o, p){
+    const value = o.value.trim();
+    if(!value) throw new Error('Enter a value for the barcode.');
+    await need('barcode');
+    const fmtName = {CODE128:'Code 128', EAN13:'EAN-13', UPC:'UPC-A', EAN8:'EAN-8', CODE39:'Code 39', ITF14:'ITF-14'}[o.format];
+    const rules = {EAN13:'12 or 13 digits', UPC:'11 or 12 digits', EAN8:'7 or 8 digits', ITF14:'13 or 14 digits', CODE39:'capital letters, numbers, spaces and - . $ / + %', CODE128:'standard keyboard characters'};
+    let ok = true;
+    const opts = {format: o.format, displayValue: o.text === 'yes', background: '#ffffff', lineColor: '#000000', font: 'monospace', valid: v => { ok = v; }};
+    const svgEl = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    JsBarcode(svgEl, value, {...opts, width: 2, height: 90, margin: 12, fontSize: 18});
+    if(!ok) throw new Error(`That isn’t a valid ${fmtName} value. It needs ${rules[o.format]}.`);
+    svgEl.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    const cv = document.createElement('canvas');
+    JsBarcode(cv, value, {...opts, width: 5, height: 220, margin: 30, fontSize: 44});
+    p(.6, 'Saving');
+    const png = await canvasToBlob(cv, 'image/png');
+    const res = [{blob: png, name: `barcode-${safeFileName(value).slice(0, 30) || 'code'}.png`},
+                 {blob: new Blob([new XMLSerializer().serializeToString(svgEl)], {type: 'image/svg+xml'}), name: `barcode-${safeFileName(value).slice(0, 30) || 'code'}.svg`}];
+    res.previewImg = png;
+    res.note = `${fmtName}. Test-scan it with your phone camera or a barcode app before printing.`;
+    return res;
+  }
+},
+{
+  id:'embed-code', name:'Embed code maker', cats:['web'], noFile:true, verb:'Create embed code',
+  desc:'Paste a YouTube or Vimeo link, or a link to a video or audio file, and get code to embed it on a website.',
+  icon: op('HTML', C.html, G.play, true),
+  options:[
+    {key:'url', label:'Video link', type:'text', inputType:'url', value:'', placeholder:'https://youtu.be/… or https://vimeo.com/…'},
+    {key:'layout', label:'Size', type:'select', value:'responsive', choices:[['responsive','Responsive (recommended)'],['fixed','Fixed (560 × 315)']]},
+    {key:'start', label:'Start at (optional, e.g. 1:30)', type:'text', value:'', placeholder:'minutes:seconds'},
+    {key:'autoplay', label:'Autoplay', type:'select', value:'no', choices:[['no','No'],['yes','Yes (starts muted, as browsers require)']]},
+    {key:'loop', label:'Loop', type:'select', value:'no', choices:[['no','No'],['yes','Yes']]},
+    {key:'controls', label:'Player controls', type:'select', value:'show', choices:[['show','Show'],['hide','Hide']]},
+    {key:'privacy', label:'YouTube privacy mode (no cookies until played)', type:'select', value:'yes', choices:[['yes','On (recommended)'],['no','Off']]}
+  ],
+  async run(files, o, p){
+    const v = parseMediaUrl(o.url);
+    const start = o.start.trim() ? Math.floor(parseTime(o.start)) : Math.floor(v.start || 0);
+    const auto = o.autoplay === 'yes', loop = o.loop === 'yes', hide = o.controls === 'hide';
+    const ratio = v.vertical ? '9 / 16' : '16 / 9', fixed = o.layout === 'fixed';
+    const fw = v.vertical ? 315 : 560, fh = v.vertical ? 560 : 315;
+    const frame = (src, title) => fixed
+      ? `<iframe width="${fw}" height="${fh}" src="${escH(src)}" title="${title}" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen loading="lazy"></iframe>`
+      : `<div style="position:relative;width:100%;${v.vertical ? 'max-width:360px;' : ''}aspect-ratio:${ratio};">
+  <iframe src="${escH(src)}" title="${title}" style="position:absolute;inset:0;width:100%;height:100%;border:0;" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen loading="lazy"></iframe>
+</div>`;
+    let code, thumb = '';
+    if(v.kind === 'youtube'){
+      const q = new URLSearchParams({rel: '0', playsinline: '1'});
+      if(start) q.set('start', start);
+      if(auto){ q.set('autoplay', '1'); q.set('mute', '1'); }
+      if(loop){ q.set('loop', '1'); q.set('playlist', v.id); }
+      if(hide) q.set('controls', '0');
+      code = frame(`https://www.${o.privacy === 'yes' ? 'youtube-nocookie' : 'youtube'}.com/embed/${v.id}?${q}`, 'YouTube video');
+      thumb = `<p class="thumb-row"><img src="https://img.youtube.com/vi/${v.id}/hqdefault.jpg" alt="" loading="lazy"><a href="https://img.youtube.com/vi/${v.id}/maxresdefault.jpg" target="_blank" rel="noopener">Open full-size thumbnail</a></p>`;
+    } else if(v.kind === 'vimeo'){
+      const q = new URLSearchParams();
+      if(v.hash) q.set('h', v.hash);
+      if(auto){ q.set('autoplay', '1'); q.set('muted', '1'); }
+      if(loop) q.set('loop', '1');
+      if(hide) q.set('controls', '0');
+      code = frame(`https://player.vimeo.com/video/${v.id}${q.toString() ? '?' + q : ''}${start ? `#t=${start}s` : ''}`, 'Vimeo video');
+    } else {
+      const src = v.src + (start ? `#t=${start}` : '');
+      const attrs = [hide ? '' : 'controls', auto ? 'autoplay muted' : '', loop ? 'loop' : '', 'playsinline', 'preload="metadata"'].filter(Boolean).join(' ');
+      code = v.kind === 'audio'
+        ? `<audio src="${escH(src)}" ${attrs.replace(' playsinline', '')} style="width:100%;"></audio>`
+        : `<video src="${escH(src)}" ${attrs} style="width:100%;height:auto;${fixed ? 'max-width:560px;' : ''}"></video>`;
+    }
+    const res = [{blob: textBlob(code), name: 'embed-code.html', copy: code}];
+    res.copyLabel = 'Copy embed code';
+    res.previewHtml = `<pre class="code">${escH(code)}</pre><div class="embed-preview">${code}</div>${thumb}`;
+    res.note = [v.kind === 'vimeo' && hide ? 'Hiding Vimeo controls only works on paid Vimeo plans.' : '', auto ? 'Autoplay starts muted, because browsers block autoplay with sound.' : ''].filter(Boolean).join(' ') || 'Paste this code into your website wherever you want the video to appear.';
+    return res;
+  }
+},
+{
+  id:'short-link', name:'Link shortener', cats:['web'], noFile:true, verb:'Shorten link',
+  desc:'Turn long links into short ones, with your own words on the end if you like.',
+  icon: op('URL', C.url, G.link),
+  options:[
+    {key:'service', label:'Shorten with', type:'select', value: () => linkPrefs().service || 'isgd', choices:[['isgd','is.gd (free, instant)'],['github','My own links on GitHub']]},
+    {key:'url', label:'Long link', type:'text', inputType:'url', value:'', placeholder:'https://example.com/a/very/long/link'},
+    {key:'slug', label:'Custom ending (optional)', type:'text', value:'', placeholder:'e.g. coaching_plans'},
+    {key:'repo', label:'GitHub repo (your-name/repo-name)', type:'text', value: () => linkPrefs().repo || '', placeholder:'yourname/links', showIf:['service','github']},
+    {key:'token', label:'GitHub access token', type:'password', value: () => linkPrefs().token || '', placeholder:'github_pat_…', showIf:['service','github']},
+    {key:'base', label:'Your links web address', type:'text', inputType:'url', value: () => linkPrefs().base || '', placeholder:'https://yourname.github.io/links', showIf:['service','github']},
+    {key:'exists', label:'If that ending is already used', type:'select', value:'stop', choices:[['stop','Stop and tell me'],['replace','Point it at the new link']], showIf:['service','github']},
+    {key:'remember', label:'Remember GitHub settings on this device', type:'select', value:'yes', choices:[['yes','Yes'],['no','No']], showIf:['service','github']}
+  ],
+  hint:'is.gd endings can use letters, numbers and underscores. For your own GitHub links: create a public repo, turn on Settings → Pages, and make a fine-grained token for just that repo with Contents set to “Read and write”.',
+  async run(files, o, p){
+    const url = cleanUrl(o.url).href;
+    const save = obj => { try{ localStorage.setItem(LINK_KEY, JSON.stringify({...linkPrefs(), ...obj})); }catch{} };
+    let short, note;
+    if(o.service === 'isgd'){
+      const slug = o.slug.trim();
+      if(slug && !/^[A-Za-z0-9_]+$/.test(slug)) throw new Error('is.gd endings can only use letters, numbers and underscores (no spaces or hyphens).');
+      p(.3, 'Contacting is.gd');
+      const d = await jsonp(`https://is.gd/create.php?format=json&logstats=0&url=${encodeURIComponent(url)}${slug ? `&shorturl=${encodeURIComponent(slug)}` : ''}`);
+      if(!d || d.errorcode || !d.shorturl) throw new Error(`is.gd said: ${(d && d.errormessage) || 'something went wrong'}`);
+      short = d.shorturl; note = 'is.gd links are permanent and can’t be edited or deleted later.';
+      save({service: 'isgd'});
+    } else {
+      const repo = o.repo.trim().replace(/^https:\/\/github\.com\//, '').replace(/\/+$/, '');
+      if(!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error('Enter the repo as your-name/repo-name.');
+      if(!o.token.trim()) throw new Error('Enter your GitHub access token.');
+      const base = cleanUrl(o.base).href.replace(/\/+$/, '');
+      let slug = o.slug.trim().toLowerCase();
+      if(!slug) slug = Math.random().toString(36).slice(2, 8);
+      if(!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(slug)) throw new Error('Endings can use letters, numbers, hyphens and underscores, with no spaces.');
+      const api = `https://api.github.com/repos/${repo}/contents/${encodeURIComponent(slug)}/index.html`;
+      const headers = {Authorization: `Bearer ${o.token.trim()}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'};
+      p(.2, 'Checking GitHub');
+      let sha, r;
+      try{ r = await fetch(api, {headers, cache: 'no-store'}); }catch{ throw new Error('Couldn’t reach GitHub. Check you’re online.'); }
+      if(r.status === 401) throw new Error('GitHub didn’t accept that token. Check it’s copied correctly and hasn’t expired.');
+      if(r.ok){
+        if(o.exists !== 'replace') throw new Error(`The ending “${slug}” is already used. Choose another, or set “If that ending is already used” to replace it.`);
+        sha = (await r.json()).sha;
+      }
+      p(.5, 'Creating your link');
+      const body = {message: `${sha ? 'Update' : 'Add'} short link: ${slug}`, content: b64utf8(redirectPage(url))};
+      if(sha) body.sha = sha;
+      try{ r = await fetch(api, {method: 'PUT', headers: {...headers, 'Content-Type': 'application/json'}, body: JSON.stringify(body)}); }
+      catch{ throw new Error('Couldn’t reach GitHub. Check you’re online.'); }
+      if(!r.ok){
+        const msg = await r.json().then(j => j.message).catch(() => '');
+        if(r.status === 404) throw new Error(`GitHub couldn’t find “${repo}”, or the token can’t access it. Check the repo name and that the token has Contents “Read and write” for it.`);
+        if(r.status === 403) throw new Error('That token isn’t allowed to write to this repo. Give it Contents “Read and write” permission.');
+        throw new Error(`GitHub said: ${msg || r.status}`);
+      }
+      short = `${base}/${slug}/`;
+      note = 'Your link goes live as soon as GitHub Pages publishes, usually within a minute.';
+      save(o.remember === 'yes' ? {service: 'github', repo, token: o.token.trim(), base} : {service: 'github', repo: '', token: '', base: ''});
+    }
+    const res = [{blob: textBlob(short), name: 'short-link.txt', copy: short}];
+    res.copyLabel = 'Copy link'; res.hideDownload = true; res.note = note;
+    res.previewHtml = `<a class="short-link" href="${escH(short)}" target="_blank" rel="noopener">${escH(short.replace(/^https?:\/\//, ''))}</a>`;
+    return res;
+  }
+},
+
 /* ---------------- FILES ---------------- */
 {
   id:'create-zip', name:'Create ZIP', cats:['files'], multiple:true, exts:'*', verb:'Create ZIP',
@@ -1059,7 +1672,7 @@ const TOOLS = [
   }
 },
 {
-  id:'image-base64', name:'Image to Base64', cats:['files','images'], exts:[...IMG_EXTS, 'svg'], imageInput:true, verb:'Encode',
+  id:'image-base64', name:'Image to Base64', cats:['web','images'], exts:[...IMG_EXTS, 'svg'], imageInput:true, verb:'Encode',
   desc:'Turn an image into Base64 code you can paste straight into HTML, CSS or an email template.',
   icon: conv('IMG', C.img, 'B64', C.b64),
   options:[{key:'format', label:'Output', type:'select', value:'uri', choices:[['uri','Data URI'],['img','HTML <img> tag'],['css','CSS background']]}],
@@ -1072,47 +1685,10 @@ const TOOLS = [
     res.note = `${fmt(text.length)} of code` + (text.length > 500000 ? '. That’s large, so consider compressing the image first.' : '.');
     return res;
   }
-},
-
-/* ---------------- COMING SOON (code kept, tiles disabled) ---------------- */
-{
-  id:'pdf-to-word', name:'PDF to Word', cats:['pdf','data'], exts:['pdf'], disabled:true,
-  desc:'Extract the text from a PDF into an editable Word document.',
-  note:'Text only — layout, images and tables aren’t kept. Scanned PDFs won’t have any text to extract.',
-  icon: conv('PDF', C.pdf, 'DOCX', C.doc),
-  async run(files, o, p){
-    const pages = await extractPdfText(files[0], p);
-    p(.95, 'Building Word document');
-    return [{blob: await buildDocx(pages), name: `${baseName(files[0].name)}.docx`}];
-  }
-},
-{
-  id:'word-to-pdf', name:'Word to PDF', cats:['pdf','data'], exts:['docx'], disabled:true,
-  desc:'Turn a Word document (.docx) into a PDF.',
-  note:'Keeps headings, lists, tables and images. Complex layouts may shift, and text in the PDF isn’t selectable.',
-  icon: conv('DOCX', C.doc, 'PDF', C.pdf),
-  async run(files, o, p){
-    p(0, 'Loading converter');
-    await need('mammoth', 'html2pdf');
-    p(.2, 'Reading document');
-    let html;
-    try{ html = (await mammoth.convertToHtml({arrayBuffer: await files[0].arrayBuffer()})).value; }
-    catch{ throw new Error('Couldn’t read this file. Make sure it’s a .docx (not an older .doc).'); }
-    const el = document.createElement('div');
-    el.className = 'docrender'; el.innerHTML = html;
-    p(.5, 'Laying out pages');
-    const blob = await html2pdf().set({
-      margin: 15, image: {type: 'jpeg', quality: .95},
-      html2canvas: {scale: 2, backgroundColor: '#ffffff', useCORS: true},
-      jsPDF: {unit: 'mm', format: 'a4', orientation: 'portrait'},
-      pagebreak: {mode: ['css', 'legacy'], avoid: ['img', 'tr']}
-    }).from(el).outputPdf('blob');
-    return [{blob, name: `${baseName(files[0].name)}.pdf`}];
-  }
 }
 ];
 
-const CATS = [['all','All tools'],['pdf','PDF'],['images','Images'],['data','Docs & data'],['files','Files']];
+const CATS = [['all','All tools'],['pdf','PDF'],['images','Images'],['video','Video & audio'],['data','Docs & data'],['web','Web & links'],['files','Files']];
 
 /* =========================================================
    ROUTER + VIEWS
@@ -1163,7 +1739,7 @@ function renderHome(){
 function renderTool(t){
   document.title = `${t.name} — Doc Swap`;
   const anyFile = t.exts === '*';
-  const exts = anyFile ? [] : t.exts;
+  const exts = anyFile || !t.exts ? [] : t.exts;
   const accept = anyFile ? '' : exts.map(e => '.' + e).join(',')
     + (t.imageInput ? ',image/*' : '')
     + (exts.includes('heic') ? ',image/heic,image/heif' : '')
@@ -1181,7 +1757,8 @@ function renderTool(t){
       <div><h1>${t.name}</h1><p>${escH(t.desc)}</p></div>
     </div>
     ${t.note ? `<p class="note">${escH(t.note)}</p>` : ''}
-    <label class="drop" id="drop">
+    ${t.long ? `<p class="note keep-open">Keep Doc Swap open on screen while this runs. iPhone pauses web apps in the background, so the screen is kept awake for you.</p>` : ''}
+    <label class="drop" id="drop" ${t.noFile ? 'hidden' : ''}>
       <input class="sr" type="file" id="file" ${accept ? `accept="${accept}"` : ''} ${t.multiple ? 'multiple' : ''}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V4m0 0L8 8m4-4 4 4"/><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>
       <strong>${t.multiple ? 'Choose files' : 'Choose a file'}</strong>
@@ -1190,7 +1767,7 @@ function renderTool(t){
     <ul class="files" id="files"></ul>
     <div class="opts" id="opts">${opts.map(optHtml).join('')}${t.hint ? `<p class="hint">${escH(t.hint)}</p>` : ''}</div>
     <button class="btn primary" id="go" disabled>${t.verb || 'Convert'}</button>
-    <div class="progress" id="prog" hidden><div class="bar" id="bar"><i></i></div><p class="status" id="status" aria-live="polite"></p></div>
+    <div class="progress" id="prog" hidden><div class="bar" id="bar"><i></i></div><p class="status" id="status" aria-live="polite"></p>${t.long ? '<button class="btn ghost small-btn" id="cancel" type="button">Cancel</button>' : ''}</div>
     <div class="result" id="result" hidden aria-live="polite"></div>
   </div>`;
 
@@ -1212,8 +1789,8 @@ function renderTool(t){
       <span class="n">${escH(f.name)}</span><span class="s">${fmt(f.size)}</span>
       ${t.multiple && files.length > 1 ? `<button class="iconbtn" data-a="up" data-i="${i}" aria-label="Move up" ${i === 0 ? 'disabled' : ''}>↑</button><button class="iconbtn" data-a="down" data-i="${i}" aria-label="Move down" ${i === files.length - 1 ? 'disabled' : ''}>↓</button>` : ''}
       <button class="iconbtn" data-a="rm" data-i="${i}" aria-label="Remove">✕</button></li>`).join('');
-    go.disabled = busy || files.length < minFiles;
-    go.textContent = files.length && files.length < minFiles ? `Add at least ${minFiles} files` : (t.verb || 'Convert');
+    go.disabled = busy || (!t.noFile && files.length < minFiles);
+    go.textContent = !t.noFile && files.length && files.length < minFiles ? `Add at least ${minFiles} files` : (t.verb || 'Convert');
   }
   list.addEventListener('click', e => {
     const b = e.target.closest('button'); if(!b) return;
@@ -1227,6 +1804,7 @@ function renderTool(t){
   ['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
   ['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
   drop.addEventListener('drop', e => add(e.dataTransfer.files));
+  drawFiles();
 
   // options
   const optsEl = $('#opts');
@@ -1239,15 +1817,39 @@ function renderTool(t){
 
   // progress
   const bar = $('#bar'), status = $('#status'), prog = $('#prog');
+  let pState = {v: 0, msg: '', t0: 0};
+  const renderStatus = () => {
+    const {v, msg, t0} = pState;
+    if(!t.long || !t0){ status.textContent = msg; return; }
+    const el = (performance.now() - t0) / 1000, parts = [msg];
+    if(v > 0) parts.push(`${Math.floor(Math.min(v, 1) * 100)}%`);
+    parts.push(`${fmtDur(el)} elapsed`);
+    if(v > .03 && v < 1 && el > 3) parts.push(`about ${fmtDur(el * (1 - v) / v)} left`);
+    status.textContent = parts.filter(Boolean).join(' · ');
+  };
   const setP = (v, msg) => {
     bar.classList.toggle('indet', !(v > 0));
     bar.firstElementChild.style.width = v > 0 ? Math.min(100, v * 100) + '%' : '';
-    if(msg) status.textContent = msg;
+    pState.v = v; if(msg) pState.msg = msg;
+    renderStatus();
   };
+  // keep the screen awake during long jobs (iPhone pauses web apps when the screen locks)
+  let wake = null;
+  const lockScreen = async () => { try{ if('wakeLock' in navigator && document.visibilityState === 'visible') wake = await navigator.wakeLock.request('screen'); }catch{} };
+  const unlockScreen = () => { try{ wake && wake.release(); }catch{} wake = null; };
+  const onVis = () => { if(busy && t.long && document.visibilityState === 'visible') lockScreen(); };
+  document.addEventListener('visibilitychange', onVis);
+  let ctl = null;
+  const cancelBtn = $('#cancel');
+  if(cancelBtn) cancelBtn.addEventListener('click', () => {
+    if(!ctl || ctl.cancelled) return;
+    ctl.cancelled = true; cancelBtn.disabled = true; cancelBtn.textContent = 'Cancelling…';
+    ctl.fns.forEach(fn => { try{ fn(); }catch{} });
+  });
 
-  function showError(msg){
+  function showError(msg, neutral){
     result.hidden = false;
-    result.innerHTML = `<div class="err"><span>⚠</span><span>${escH(msg)}</span></div>`;
+    result.innerHTML = `<div class="err${neutral ? ' neutral' : ''}"><span>${neutral ? 'ⓘ' : '⚠'}</span><span>${escH(msg)}</span></div>`;
   }
   function showResult(out){
     revokeAll();
@@ -1259,15 +1861,19 @@ function renderTool(t){
     const total = items.reduce((s, o) => s + o.blob.size, 0);
     const saved = items.every(o => o.from) ? (() => { const a = items.reduce((s, o) => s + o.from, 0); return total < a ? ` · ${Math.round((1 - total / a) * 100)}% smaller` : ''; })() : '';
     const zipBtn = !t.noZip;
+    let preview = '';
+    if(out.previewImg){ const u = URL.createObjectURL(out.previewImg); objectUrls.push(u); preview = `<div class="preview${out.previewBg ? ' checker' : ''}"><img src="${u}" alt="Preview"></div>`; }
+    else if(out.previewHtml) preview = `<div class="preview html">${out.previewHtml}</div>`;
     result.hidden = false;
     result.innerHTML = `
       <div class="done"><span class="tick">✓</span><div>
         <strong>${one ? 'Your file is ready' : `${items.length} files ready`}</strong>
         <small>${one ? `${escH(one.name)} · ${one.from ? fmt(one.from) + ' → ' : ''}${fmt(one.blob.size)}` : fmt(total) + ' in total'}${saved}</small>
       </div></div>
+      ${preview}
       ${out.note ? `<p class="result-note">${escH(out.note)}</p>` : ''}
       ${copyItem ? `<button class="btn ${one ? 'primary' : 'secondary'}" id="copy">${escH(out.copyLabel || 'Copy to clipboard')}</button>` : ''}
-      ${one ? (canShare
+      ${one && out.hideDownload ? '' : one ? (canShare
               ? `<div class="btn-row two">
                    <button class="btn ${PREFER_SHARE && !copyItem ? 'primary' : 'secondary'}" id="share">Save or share</button>
                    <a class="btn ${PREFER_SHARE || copyItem ? 'secondary' : 'primary'}" href="${one.u}" download="${escH(one.name)}">Download</a>
@@ -1278,7 +1884,7 @@ function renderTool(t){
                  ${zipBtn ? `<button class="btn ${canShare && PREFER_SHARE ? 'secondary' : 'primary'}" id="zip">Download all (.zip)</button>` : ''}
                </div>
                <ul class="outs">${items.map(o => `<li><span class="n">${escH(o.name)}</span><span class="s">${o.from ? fmt(o.from) + ' → ' : ''}${fmt(o.blob.size)}</span><a class="btn small" href="${o.u}" download="${escH(o.name)}">Save</a></li>`).join('')}</ul>`}
-      <button class="btn ghost" id="again">Convert another</button>`;
+      <button class="btn ghost" id="again">${t.noFile ? 'Make another' : 'Convert another'}</button>`;
     const cp = $('#copy');
     if(cp) cp.addEventListener('click', async () => {
       const label = cp.textContent;
@@ -1313,24 +1919,31 @@ function renderTool(t){
       }catch(e){ showError(e.message); }
       z.disabled = false; z.textContent = 'Download all (.zip)';
     });
-    $('#again').addEventListener('click', () => { files = []; drawFiles(); result.hidden = true; revokeAll(); window.scrollTo({top: 0, behavior: 'smooth'}); });
+    $('#again').addEventListener('click', () => { if(!t.noFile) files = []; drawFiles(); result.hidden = true; result.innerHTML = ''; revokeAll(); window.scrollTo({top: 0, behavior: 'smooth'}); });
   }
 
   go.addEventListener('click', async () => {
-    if(busy || files.length < minFiles) return;
-    busy = true; go.disabled = true; result.hidden = true; prog.hidden = false;
+    if(busy || (!t.noFile && files.length < minFiles)) return;
+    busy = true; go.disabled = true; result.hidden = true; result.innerHTML = ''; prog.hidden = false;
+    ctl = {cancelled: false, fns: [], onCancel(fn){ this.fns.push(fn); }};
+    if(cancelBtn){ cancelBtn.disabled = false; cancelBtn.textContent = 'Cancel'; }
+    pState = {v: 0, msg: 'Getting ready…', t0: performance.now()};
+    const timer = t.long ? setInterval(renderStatus, 1000) : null;
+    if(t.long) lockScreen();
     setP(0, 'Getting ready…');
     await tick();
     try{
-      const out = await t.run(files, getOpts(), setP);
+      const out = await t.run(files, getOpts(), setP, ctl);
       if(!out || !out.length) throw new Error('Nothing was produced from this file.');
       setP(1, 'Done');
       showResult(out);
       result.scrollIntoView({behavior: 'smooth', block: 'nearest'});
     }catch(e){
-      console.error(e);
-      showError(e && e.message ? e.message : 'Something went wrong. Please try again.');
+      if(ctl.cancelled || (e && e.cancelled)) showError('Cancelled. Nothing was saved.', true);
+      else { console.error(e); showError(e && e.message ? e.message : 'Something went wrong. Please try again.'); }
     }finally{
+      if(timer) clearInterval(timer);
+      unlockScreen();
       busy = false; drawFiles();
       setTimeout(() => { prog.hidden = true; }, 500);
     }
@@ -1338,9 +1951,11 @@ function renderTool(t){
 }
 
 function optHtml(o){
-  if(o.type === 'select') return `<label class="field" data-key="${o.key}"><span>${escH(o.label)}</span><select name="${o.key}">${o.choices.map(([v, l]) => `<option value="${escH(v)}" ${v === o.value ? 'selected' : ''}>${escH(l)}</option>`).join('')}</select></label>`;
+  const val = typeof o.value === 'function' ? o.value() : o.value;
+  if(o.type === 'select') return `<label class="field" data-key="${o.key}"><span>${escH(o.label)}</span><select name="${o.key}">${o.choices.map(([v, l]) => `<option value="${escH(v)}" ${v === val ? 'selected' : ''}>${escH(l)}</option>`).join('')}</select></label>`;
+  const type = o.type === 'password' ? 'password' : (o.inputType || 'text');
   const num = o.type === 'number' ? ' inputmode="numeric" pattern="[0-9]*"' : '';
-  return `<label class="field" data-key="${o.key}"><span>${escH(o.label)}</span><input name="${o.key}" type="text"${num} value="${escH(o.value || '')}" placeholder="${escH(o.placeholder || '')}" autocomplete="off" autocapitalize="off" spellcheck="false"></label>`;
+  return `<label class="field" data-key="${o.key}"><span>${escH(o.label)}</span><input name="${o.key}" type="${type}"${num} value="${escH(val || '')}" placeholder="${escH(o.placeholder || '')}" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"></label>`;
 }
 
 /* =========================================================
