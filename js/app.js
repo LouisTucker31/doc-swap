@@ -2,7 +2,7 @@
    Doc Swap: app.js
    Paths are relative to index.html (js/lib, assets/...).
    ========================================================= */
-const APP_VERSION = '8';
+const APP_VERSION = '9';
 
 /* =========================================================
    LIBRARIES: bundled next to index.html, loaded only when a tool needs them
@@ -15,8 +15,7 @@ const LIB = {
   media:    'js/lib/mediabunny.min.js',   // video & audio (uses the device's built-in codecs)
   gif:      'js/lib/gifenc.min.js',
   qr:       'js/lib/qrcode.js',
-  barcode:  'js/lib/jsbarcode.min.js',
-  tf:       'js/lib/tf.min.js'            // AI upscaler
+  barcode:  'js/lib/jsbarcode.min.js'
 };
 const PDFJS_WORKER = 'js/lib/pdf.worker.min.js';
 const _loading = {};
@@ -420,129 +419,6 @@ function gainSample(s, g){
   return new M.AudioSample({data, format: 'f32-planar', numberOfChannels: n, sampleRate: s.sampleRate, timestamp: s.timestamp});
 }
 
-/* ---------- AI upscaler (ESRGAN-slim model, TensorFlow.js) ---------- */
-const _models = {};
-async function upscaleCanvas(src, scale, p, ctl){
-  await need('tf');
-  try{ await tf.setBackend('webgl'); }catch{ await tf.setBackend('cpu'); }
-  await tf.ready();
-  p(0, 'Loading the AI model');
-  if(!_models[scale]){
-    try{ _models[scale] = await tf.loadLayersModel(`assets/models/upscale-x${scale}.json`); }
-    catch{ throw new Error('Couldn’t load the AI model. Open Doc Swap once while online so it can save it for offline use.'); }
-  }
-  const model = _models[scale];
-  const W = src.width, H = src.height, T = 96, PAD = 8;
-  const sctx = src.getContext('2d', {willReadFrequently: true});
-  const out = document.createElement('canvas'); out.width = W * scale; out.height = H * scale;
-  const octx = out.getContext('2d');
-  const tiles = [];
-  for(let y = 0; y < H; y += T) for(let x = 0; x < W; x += T) tiles.push([x, y]);
-  for(const [k, [x0, y0]] of tiles.entries()){
-    checkCancel(ctl);
-    const rx = Math.max(0, x0 - PAD), ry = Math.max(0, y0 - PAD);
-    const rw = Math.min(W, x0 + T + PAD) - rx, rh = Math.min(H, y0 + T + PAD) - ry;
-    const region = sctx.getImageData(rx, ry, rw, rh);
-    const result = tf.tidy(() => {
-      const t = tf.browser.fromPixels(region).toFloat().expandDims(0);
-      return model.predict(t).squeeze().clipByValue(0, 255).round().toInt();
-    });
-    const px = await tf.browser.toPixels(result);
-    result.dispose();
-    const tileImg = new ImageData(px, rw * scale, rh * scale);
-    const tw = Math.min(T, W - x0) * scale, th = Math.min(T, H - y0) * scale;
-    // place only the centre of the tile (the padding just gives the model context at the edges)
-    octx.putImageData(tileImg, rx * scale, ry * scale, (x0 - rx) * scale, (y0 - ry) * scale, tw, th);
-    p((k + 1) / tiles.length, `Upscaling (${k + 1} of ${tiles.length} sections)`);
-    await tf.nextFrame();
-  }
-  return out;
-}
-function hasAlpha(c){
-  const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-  for(let i = 3; i < d.length; i += 4) if(d[i] < 255) return true;
-  return false;
-}
-
-/* ---------- speech to text (the engine itself runs in js/transcribe-worker.js) ---------- */
-const SPEECH_RATE = 16000, SPEECH_MAX_S = 2 * 3600;
-
-/* Decode a recording's sound to 16 kHz mono, which is what Whisper expects.
-   Mediabunny streams it in pieces so long files don't need the whole decoded file in memory;
-   browsers without WebCodecs fall back to decodeAudioData, which resamples for us. */
-async function speechAudio(f, p){
-  let M = null;
-  try{ M = await media(); }catch{ /* no WebCodecs: use the fallback below */ }
-  if(M){
-    const input = await openMedia(f), at = await input.getPrimaryAudioTrack();
-    if(!at) throw new Error(`“${f.name}” has no sound in it.`);
-    if(!(await at.canDecode())) throw new Error('This device can’t read the sound in this file. Try converting it to MP3 with the Audio converter first.');
-    const dur = await at.computeDuration();
-    if(dur > SPEECH_MAX_S) throw new Error(`This recording is ${fmtDur(dur)} long. Transcribe works on recordings up to 2 hours.`);
-    const out = new Float32Array(Math.ceil(dur * SPEECH_RATE) + SPEECH_RATE);
-    for await (const {buffer, timestamp} of new M.AudioBufferSink(at).buffers()){
-      const sr = buffer.sampleRate, n = buffer.length, ch = buffer.numberOfChannels, mono = new Float32Array(n);
-      for(let c = 0; c < ch; c++){ const d = buffer.getChannelData(c); for(let i = 0; i < n; i++) mono[i] += d[i] / ch; }
-      // average the source samples that fall inside each 1/16000 s slot (a simple anti-alias filter)
-      const first = Math.max(0, Math.ceil(timestamp * SPEECH_RATE)), last = Math.min(out.length, Math.floor((timestamp + n / sr) * SPEECH_RATE));
-      for(let j = first; j < last; j++){
-        const a = Math.max(0, Math.floor((j / SPEECH_RATE - timestamp) * sr)), b = Math.min(n, Math.max(a + 1, Math.floor(((j + 1) / SPEECH_RATE - timestamp) * sr)));
-        let s = 0; for(let i = a; i < b; i++) s += mono[i];
-        out[j] = s / (b - a);
-      }
-      p(Math.min(.1, timestamp / dur * .1), 'Reading the sound');
-    }
-    return out.subarray(0, Math.ceil(dur * SPEECH_RATE));
-  }
-  let decoded;
-  try{ decoded = await new OfflineAudioContext(1, 1, SPEECH_RATE).decodeAudioData(await f.arrayBuffer()); }
-  catch{ throw new Error(`Couldn’t read the sound in “${f.name}”. Try converting it to MP3 with the Audio converter first.`); }
-  if(decoded.duration > SPEECH_MAX_S) throw new Error(`This recording is ${fmtDur(decoded.duration)} long. Transcribe works on recordings up to 2 hours.`);
-  const out = new Float32Array(decoded.length);
-  for(let c = 0; c < decoded.numberOfChannels; c++){ const d = decoded.getChannelData(c); for(let i = 0; i < out.length; i++) out[i] += d[i] / decoded.numberOfChannels; }
-  return out;
-}
-
-/* Split into ~2 minute sections (so progress and Cancel work), cutting at the quietest moment
-   near each boundary so words aren't chopped. Near-silent sections are dropped, because Whisper
-   tends to invent words ("Thank you.") when it hears nothing. */
-function speechSections(audio){
-  const R = SPEECH_RATE, target = 120 * R, search = 4 * R, win = R / 10, sections = [];
-  const rms = (a, b) => { let s = 0; for(let i = a; i < b; i++) s += audio[i] * audio[i]; return Math.sqrt(s / Math.max(1, b - a)); };
-  let start = 0;
-  while(start < audio.length){
-    let end = Math.min(audio.length, start + target);
-    if(end < audio.length){
-      let best = end, quiet = Infinity;
-      for(let c = end - search; c < Math.min(audio.length - win, end + search); c += win){ const v = rms(c, c + win); if(v < quiet){ quiet = v; best = c + win / 2; } }
-      end = Math.round(best);
-    }
-    if(rms(start, end) > .002) sections.push([start, end]);
-    start = end;
-  }
-  return sections;
-}
-
-function transcribeJob({audio, sections, model, language, p, ctl}){
-  return new Promise((resolve, reject) => {
-    const w = new Worker('js/transcribe-worker.js', {type: 'module'});
-    if(ctl) ctl.onCancel(() => { w.terminate(); reject(new Cancelled()); });
-    w.onmessage = ({data: m}) => {
-      if(m.type === 'download') p(.1 + .2 * m.loaded / m.total, `Downloading the speech model, one time only (${fmt(m.loaded)} of ${fmt(m.total)})`);
-      else if(m.type === 'ready') p(.3, `Listening (section 1 of ${sections.length})`);
-      else if(m.type === 'section') p(.3 + .7 * m.done / m.total, m.done < m.total ? `Listening (section ${m.done + 1} of ${m.total})` : 'Writing the transcript');
-      else { w.terminate(); m.type === 'done' ? resolve(m) : reject(new Error(m.message)); }
-    };
-    w.onerror = e => { e.preventDefault(); w.terminate(); reject(new Error('This browser couldn’t start the speech engine. Update it, or try Chrome, Edge or Safari.')); };
-    w.postMessage({audio, sections, model, language}, [audio.buffer]);
-  });
-}
-
-const srtTime = s => { const ms = Math.max(0, Math.round(s * 1000)), h = Math.floor(ms / 3600000), m = Math.floor(ms / 60000) % 60, sec = Math.floor(ms / 1000) % 60; return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')},${String(ms % 1000).padStart(3, '0')}`; };
-const toSrt = chunks => chunks.map((c, i) => `${i + 1}\n${srtTime(c.start)} --> ${srtTime(Math.max(c.end, c.start + .5))}\n${c.text}\n`).join('\n');
-// a new paragraph wherever the speaker pauses for more than two seconds
-const toParagraphs = chunks => chunks.reduce((out, c, i) => out + (i === 0 ? '' : c.start - chunks[i - 1].end > 2 ? '\n\n' : ' ') + c.text, '');
-
 /* ---------- codes & links ---------- */
 function qrMatrix(text, ecc = 'M'){
   if(typeof qrcode.stringToBytesFuncs === 'object' && qrcode.stringToBytesFuncs['UTF-8']) qrcode.stringToBytes = qrcode.stringToBytesFuncs['UTF-8'];
@@ -654,7 +530,6 @@ Object.assign(C, {mp4:'#4f46e5', mov:'#64748b', mp3:'#c026d3', gif:'#65a30d', ht
 Object.assign(G, {
   play:'M-2-3.6v7.2l5.6-3.6z',
   mute:'M-4.6-1.6h1.8l2.6-2.4v8l-2.6-2.4h-1.8zM1.6-1.6l3 3M4.6-1.6l-3 3',
-  sparkle:'M0-4.8 1.3-1.3 4.8 0 1.3 1.3 0 4.8-1.3 1.3-4.8 0-1.3-1.3z',
   frames:'M-4.2-4.2h3.4v3.4h-3.4zM.8-4.2h3.4v3.4H.8zM-4.2.8h3.4v3.4h-3.4zM.8.8h3.4v3.4H.8z',
   link:'M-1.2 1.2l2.4-2.4M-2.6-.4l-1 1a1.9 1.9 0 0 0 2.7 2.7l1-1M2.6.4l1-1a1.9 1.9 0 0 0-2.7-2.7l-1 1'
 });
@@ -1163,36 +1038,6 @@ const TOOLS = [
   }
 },
 
-{
-  id:'upscale-image', name:'AI upscale', cats:['images'], exts:IMG_EXTS, imageInput:true, long:true, verb:'Upscale',
-  desc:'Make small or low-res images 2× or 4× bigger, with AI adding sharper detail. Runs entirely on your device.',
-  note:'Works best on graphics, logos, screenshots and small photos. Faces can look slightly smoothed.',
-  icon: op('IMG', C.img, G.sparkle, true),
-  options:[{key:'scale', label:'Upscale by', type:'select', value:'2', choices:[['2','2× (e.g. 800 px → 1600 px)'],['4','4× (e.g. 400 px → 1600 px)']]}],
-  async run(files, o, p, ctl){
-    const f = files[0], s = +o.scale;
-    const src = await imageToCanvas(f);
-    const W = src.width, H = src.height, max = s === 2 ? 2_600_000 : 900_000;
-    if(W * H > max){
-      const side = Math.floor(Math.sqrt(max) / 100) * 100;
-      throw new Error(`This image is ${W}×${H} px, which is too big to upscale ${s}×. Use one up to about ${side}×${side} px (try Resize image first)${s === 4 ? ', or choose 2×' : ''}.`);
-    }
-    let out = await upscaleCanvas(src, s, p, ctl);
-    if(hasAlpha(src)){
-      const a = scaleCanvas(src, out.width, out.height).getContext('2d').getImageData(0, 0, out.width, out.height).data;
-      const octx = out.getContext('2d'), im = octx.getImageData(0, 0, out.width, out.height);
-      for(let i = 3; i < im.data.length; i += 4) im.data[i] = a[i];
-      octx.putImageData(im, 0, 0);
-    }
-    p(1, 'Saving image');
-    const r = await saveCanvas(out, f, `-${s}x`);
-    const res = [{...r, from: f.size}];
-    res.note = `${W}×${H} → ${out.width}×${out.height} px`;
-    res.previewImg = r.blob;
-    return res;
-  }
-},
-
 /* ---------------- VIDEO & AUDIO ---------------- */
 {
   id:'convert-video', name:'Convert video', cats:['video'], exts:VIDEO_EXTS, label:'MP4, MOV, WEBM, MKV', long:true,
@@ -1387,39 +1232,6 @@ const TOOLS = [
     const res = [{blob, name: `${baseName(f.name)}.gif`}];
     res.note = `${gw}×${gh} px, ${(end - start).toFixed(1).replace(/\.0$/, '')} seconds, ${k} frames`;
     res.previewImg = blob;
-    return res;
-  }
-},
-
-{
-  id:'transcribe', name:'Transcribe audio', cats:['video','data'], exts:[...VIDEO_EXTS, ...AUDIO_EXTS], label:'videos or audio (MP4, MOV, MP3, M4A, WAV…)', long:true, verb:'Transcribe',
-  desc:'Turn the speech in a video or audio file into text, plus a subtitle file (.srt) with timings.',
-  note:'The first time, this downloads a speech model (roughly 60 to 200 MB, depending on the options) and keeps it for next time. Your recording never leaves your device.',
-  icon: conv('MP3', C.mp3, 'TXT', C.txt),
-  options:[
-    {key:'lang', label:'Spoken language', type:'select', value:'english', choices:[['english','English'],['french','French'],['german','German'],['spanish','Spanish'],['italian','Italian'],['portuguese','Portuguese'],['dutch','Dutch'],['polish','Polish'],['welsh','Welsh'],['romanian','Romanian'],['russian','Russian'],['ukrainian','Ukrainian'],['turkish','Turkish'],['arabic','Arabic'],['urdu','Urdu'],['hindi','Hindi'],['punjabi','Punjabi'],['chinese','Chinese'],['japanese','Japanese'],['korean','Korean']]},
-    {key:'quality', label:'Accuracy', type:'select', value:'fast', choices:[['fast','Quick (smaller download)'],['better','More accurate (bigger download, slower)']]}
-  ],
-  hint:'For languages other than English, choose More accurate. Speech recognition gets names and numbers wrong sometimes, so check anything important.',
-  async run(files, o, p, ctl){
-    const f = files[0];
-    p(0, 'Reading the sound');
-    const audio = await speechAudio(f, p), dur = audio.length / SPEECH_RATE;
-    checkCancel(ctl);
-    const sections = speechSections(audio);
-    if(!sections.length) throw new Error('No speech was found. The recording seems to be silent.');
-    const english = o.lang === 'english', size = o.quality === 'better' ? 'base' : 'tiny';
-    const t0 = performance.now();
-    const {chunks, device} = await transcribeJob({audio, sections, model: `onnx-community/whisper-${size}${english ? '.en' : ''}`, language: english ? null : o.lang, p, ctl});
-    if(!chunks.length) throw new Error('No speech could be made out in this recording.');
-    const text = toParagraphs(chunks), words = text.split(/\s+/).filter(Boolean).length;
-    const res = [
-      {blob: textBlob(text + '\n'), name: `${baseName(f.name)}-transcript.txt`, copy: text},
-      {blob: textBlob(toSrt(chunks), 'application/x-subrip;charset=utf-8'), name: `${baseName(f.name)}.srt`}
-    ];
-    res.copyLabel = 'Copy transcript';
-    res.previewHtml = `<pre class="code">${escH(text.length > 1500 ? text.slice(0, 1500) + '…' : text)}</pre>`;
-    res.note = `${fmtDur(dur)} of audio, ${words} word${words === 1 ? '' : 's'}, done in ${fmtDur((performance.now() - t0) / 1000)}${device === 'webgpu' ? ' using your graphics chip' : ''}. The .srt file adds subtitles in most video players and editors.`;
     return res;
   }
 },
