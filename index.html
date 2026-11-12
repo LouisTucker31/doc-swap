@@ -2,6 +2,10 @@
 <html lang="en-GB">
 <head>
 <meta charset="utf-8">
+<!-- CSP as a meta tag because GitHub Pages can't send headers (so no frame-ancestors). See README > Security.
+     'unsafe-eval' is only there for heic2any, whose Emscripten build creates functions at runtime. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://is.gd 'unsafe-eval' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self' data: blob: https://img.youtube.com; media-src 'self' blob: https:; frame-src https://www.youtube-nocookie.com https://www.youtube.com https://player.vimeo.com; connect-src 'self' blob: data: https://api.github.com; font-src 'self' data:; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="strict-origin-when-cross-origin">
 <!-- Zoom locked: maximum-scale + user-scalable=no (gestures also blocked in app.js for iOS) -->
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Doc Swap</title>

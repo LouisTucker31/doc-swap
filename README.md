@@ -42,5 +42,13 @@ assets/fonts/           Plus Jakarta Sans
 assets/models/          AI upscaling models, upscale-x2/x4 (.json + .bin) (ESRGAN-slim, MIT licence)
 ```
 
+## Security
+- **Content Security Policy** is set with a `<meta>` tag in `index.html`, because GitHub Pages can't send custom headers. It only allows the app's own files, is.gd (Link shortener), the GitHub API (GitHub links), YouTube and Vimeo frames and YouTube thumbnails (Embed code preview). If you add a tool that loads anything else, add that source to the policy or it will be blocked.
+- `'unsafe-eval'` is in the policy only because heic2any needs it. Remove it if heic2any is ever replaced.
+- A meta-tag CSP can't set `frame-ancestors`, and GitHub Pages can't set `Strict-Transport-Security`, `X-Content-Type-Options` or `Permissions-Policy`. If the app moves to a host that supports headers (Netlify, Cloudflare Pages), set those there. GitHub Pages already forces HTTPS when "Enforce HTTPS" is ticked in Settings → Pages.
+- PDFs are opened with `isEvalSupported: false`, which blocks CVE-2024-4367 in the bundled pdf.js 3.11.174.
+- `js/lib/xlsx.full.min.js` is SheetJS 0.18.5, which has two known issues when opening a crafted spreadsheet (CVE-2023-30533 and CVE-2024-22363). Replace it with the current version from https://cdn.sheetjs.com (0.20.3 or later). It isn't on npm, so Dependabot won't flag it.
+- If you tick "Remember GitHub settings", the GitHub token is saved in this browser's local storage. Give it access to the links repo only, with Contents "Read and write" and an expiry date.
+
 ## Adding a tool
 Add an object to the `TOOLS` array in `js/app.js` with `id`, `name`, `cats` (pdf / images / video / data / web / files), `exts`, `icon`, `desc` and an async `run(files, options, progress)` that returns `[{ blob, name }]`.

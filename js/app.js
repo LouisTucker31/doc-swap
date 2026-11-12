@@ -1,11 +1,11 @@
 /* =========================================================
-   DOC SWAP — app.js
+   Doc Swap: app.js
    Paths are relative to index.html (js/lib, assets/...).
    ========================================================= */
 const APP_VERSION = '5';
 
 /* =========================================================
-   LIBRARIES — bundled next to index.html, loaded only when a tool needs them
+   LIBRARIES: bundled next to index.html, loaded only when a tool needs them
    ========================================================= */
 const LIB = {
   pdfjs:    'js/lib/pdf.min.js',
@@ -177,7 +177,7 @@ async function buildIco(src){
   return new Blob([buf], {type: 'image/x-icon'});
 }
 
-/* ---------- photo metadata removal (lossless — image data is untouched) ---------- */
+/* ---------- photo metadata removal (lossless, image data is untouched) ---------- */
 function readExif(seg){            // seg = APP1 payload starting at "Exif\0\0"
   const r = {orientation: 1, gps: false, camera: false, date: false};
   try{
@@ -191,7 +191,7 @@ function readExif(seg){            // seg = APP1 payload starting at "Exif\0\0"
       if(tag === 0x010F || tag === 0x0110) r.camera = true;
       if(tag === 0x0132 || tag === 0x8769) r.date = true;
     }
-  }catch{}
+  }catch{ /* damaged EXIF: keep the defaults above, the photo is still cleaned */ }
   return r;
 }
 function orientationExif(o){       // minimal EXIF holding only the rotation, so photos stay upright
@@ -250,7 +250,8 @@ async function loadPdf(f, opts = {}){
   catch{ throw new Error(`“${f.name}” doesn’t look like a valid PDF.`); }
 }
 async function openPdfjs(f){
-  try{ return await pdfjsLib.getDocument({data: await f.arrayBuffer()}).promise; }
+  // isEvalSupported:false closes CVE-2024-4367 (a crafted PDF font could run script) in this pdf.js 3.x build
+  try{ return await pdfjsLib.getDocument({data: await f.arrayBuffer(), isEvalSupported: false}).promise; }
   catch(e){ throw new Error(e && e.name === 'PasswordException' ? 'This PDF is password-protected.' : `“${f.name}” doesn’t look like a valid PDF.`); }
 }
 function parseRanges(str, n){
@@ -512,7 +513,7 @@ const cleanUrl = raw => {
 function parseMediaUrl(raw){
   const u = cleanUrl(raw), host = u.hostname.replace(/^(www\.|m\.|music\.)/, '');
   const t = u.searchParams.get('t') || u.searchParams.get('start') || (u.hash.match(/t=([\dhms]+)/) || [])[1];
-  let start = 0; try{ start = t ? parseTime(t) : 0; }catch{}
+  let start = 0; try{ start = t ? parseTime(t) : 0; }catch{ /* unreadable ?t= value: start from the beginning */ }
   let id = null, vertical = false;
   if(host === 'youtu.be') id = u.pathname.slice(1).split('/')[0];
   else if(host === 'youtube.com' || host === 'youtube-nocookie.com'){
@@ -558,7 +559,7 @@ const LINK_KEY = 'docswap.links';
 const linkPrefs = () => { try{ return JSON.parse(localStorage.getItem(LINK_KEY)) || {}; }catch{ return {}; } };
 
 /* =========================================================
-   ICONS — tile graphics (original artwork)
+   ICONS: tile graphics (original artwork)
    ========================================================= */
 const C = {pdf:'#e5484d', jpg:'#f5a524', png:'#8e4ec6', webp:'#12a594', heic:'#d6409f', doc:'#3e63dd', xls:'#30a46c', csv:'#0b9fc4',
            txt:'#70707c', svg:'#e8590c', ico:'#475569', json:'#b45309', zip:'#78716c', b64:'#9333ea', img:'#f5a524'};
@@ -600,7 +601,7 @@ const op = (label, c, glyph, fill, tilt) => svg((tilt ? `<g transform="rotate(-1
 const pair = (label, c, glyph) => svg(doc(8, 10, label, c) + doc(44, 10, label, c) + badge(40, 28, glyph));
 
 /* =========================================================
-   TOOLS — each one is self-contained
+   TOOLS: each one is self-contained
    Fields: id, name, cats, exts ('*' = any file), imageInput, label, multiple,
            minFiles, verb, desc, note, icon, options, disabled, noZip, run()
    run() returns [{blob, name, from?, copy?}] and may set result.note
@@ -718,8 +719,9 @@ const TOOLS = [
         else if(f.type === 'image/jpeg') img = await d.embedJpg(await f.arrayBuffer());
       }catch{ img = null; }
       if(!img){
-        const c = await imageToCanvas(f, 0, '#fff');
-        img = await d.embedJpg(await (await canvasToBlob(c, 'image/jpeg', .92)).arrayBuffer());
+        const c = await imageToCanvas(f, 0, '#fff'), b = await canvasToBlob(c, 'image/jpeg', .92);
+        // a browser without JPEG export hands back PNG instead, so embed whatever actually came out
+        img = b.type === 'image/jpeg' ? await d.embedJpg(await b.arrayBuffer()) : await d.embedPng(await b.arrayBuffer());
       }
       if(o.size === 'fit'){
         const w = img.width * .75, h = img.height * .75;
@@ -884,7 +886,8 @@ const TOOLS = [
     for(const [i, f] of files.entries()){
       p(i / files.length, `Compressing ${f.name}`);
       const c = await imageToCanvas(f, +o.max, '#fff');
-      res.push({blob: await canvasToBlob(c, 'image/jpeg', +o.q), name: `${baseName(f.name)}-compressed.jpg`, from: f.size});
+      const blob = await canvasToBlob(c, 'image/jpeg', +o.q);
+      res.push({blob, name: `${baseName(f.name)}-compressed.${EXT_FOR[blob.type] || 'jpg'}`, from: f.size});
       c.width = c.height = 0;
     }
     return res;
@@ -1022,13 +1025,15 @@ const TOOLS = [
       p(i / files.length, `Converting ${f.name}`);
       const heic = /^hei[cf]$/.test(extOf(f.name)) || /hei[cf]/.test(f.type);
       let blob;
-      if(heic){
+      // Safari 17+ reads HEIC natively, which is much faster than heic2any; other browsers fall through
+      if(heic) try{ blob = await canvasToBlob(await imageToCanvas(f, 0, o.to === 'image/jpeg' ? '#fff' : null), o.to, .92); }catch{ blob = null; }
+      if(heic && !blob){
         await need('heic');
         let r;
         try{ r = await heic2any({blob: f, toType: o.to, quality: .92}); }
         catch{ throw new Error(`Couldn’t convert “${f.name}”. It may not be a HEIC photo.`); }
         blob = Array.isArray(r) ? r[0] : r;
-      } else {
+      } else if(!blob){
         // iPhone often hands over photos already converted to JPG, so handle those too
         const c = await imageToCanvas(f, 0, o.to === 'image/jpeg' ? '#fff' : null);
         blob = await canvasToBlob(c, o.to, .92);
@@ -1539,7 +1544,7 @@ const TOOLS = [
       if(loop){ q.set('loop', '1'); q.set('playlist', v.id); }
       if(hide) q.set('controls', '0');
       code = frame(`https://www.${o.privacy === 'yes' ? 'youtube-nocookie' : 'youtube'}.com/embed/${v.id}?${q}`, 'YouTube video');
-      thumb = `<p class="thumb-row"><img src="https://img.youtube.com/vi/${v.id}/hqdefault.jpg" alt="" loading="lazy"><a href="https://img.youtube.com/vi/${v.id}/maxresdefault.jpg" target="_blank" rel="noopener">Open full-size thumbnail</a></p>`;
+      thumb = `<p class="thumb-row"><img src="https://img.youtube.com/vi/${v.id}/hqdefault.jpg" alt="" loading="lazy"><a href="https://img.youtube.com/vi/${v.id}/maxresdefault.jpg" target="_blank" rel="noopener noreferrer">Open full-size thumbnail</a></p>`;
     } else if(v.kind === 'vimeo'){
       const q = new URLSearchParams();
       if(v.hash) q.set('h', v.hash);
@@ -1578,7 +1583,7 @@ const TOOLS = [
   hint:'is.gd endings can use letters, numbers and underscores. For your own GitHub links: create a public repo, turn on Settings → Pages, and make a fine-grained token for just that repo with Contents set to “Read and write”.',
   async run(files, o, p){
     const url = cleanUrl(o.url).href;
-    const save = obj => { try{ localStorage.setItem(LINK_KEY, JSON.stringify({...linkPrefs(), ...obj})); }catch{} };
+    const save = obj => { try{ localStorage.setItem(LINK_KEY, JSON.stringify({...linkPrefs(), ...obj})); }catch{ /* storage blocked (private mode): the link still works, settings just aren’t remembered */ } };
     let short, note;
     if(o.service === 'isgd'){
       const slug = o.slug.trim();
@@ -1623,7 +1628,7 @@ const TOOLS = [
     }
     const res = [{blob: textBlob(short), name: 'short-link.txt', copy: short}];
     res.copyLabel = 'Copy link'; res.hideDownload = true; res.note = note;
-    res.previewHtml = `<a class="short-link" href="${escH(short)}" target="_blank" rel="noopener">${escH(short.replace(/^https?:\/\//, ''))}</a>`;
+    res.previewHtml = `<a class="short-link" href="${escH(short)}" target="_blank" rel="noopener noreferrer">${escH(short.replace(/^https?:\/\//, ''))}</a>`;
     return res;
   }
 },
@@ -1704,7 +1709,8 @@ const I = {
 };
 /* Success badge: the output file type with a small tick */
 function doneIcon(name){
-  const e = (extOf(name) || 'file').slice(0, 4).toUpperCase();
+  // the extension can come from a file inside a ZIP, so escape it before it goes into the SVG markup
+  const e = escH((extOf(name) || 'file').slice(0, 4).toUpperCase());
   const col = {PDF:C.pdf, JPG:C.jpg, JPEG:C.jpg, PNG:C.png, WEBP:C.webp, GIF:C.gif, SVG:C.svg, ICO:C.ico, MP4:C.mp4, MOV:C.mov, WEBM:C.mp4, MKV:C.mp4,
     MP3:C.mp3, M4A:C.mp3, WAV:C.mp3, XLSX:C.xls, CSV:C.csv, JSON:C.json, TXT:C.txt, ZIP:C.zip, HTML:C.html, DOCX:C.doc}[e] || C.txt;
   return `<svg class="done-ico" viewBox="0 0 40 46" aria-hidden="true">${doc(4, 2, e, col)}<g transform="translate(31 36)"><circle r="8" fill="var(--ok)" stroke="var(--surface)" stroke-width="2.5"/><path d="M-3.4 .2l2.3 2.3 4.6-4.8" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g></svg>`;
@@ -1863,8 +1869,8 @@ function renderTool(t){
   };
   // keep the screen awake during long jobs (iPhone pauses web apps when the screen locks)
   let wake = null;
-  const lockScreen = async () => { try{ if('wakeLock' in navigator && document.visibilityState === 'visible') wake = await navigator.wakeLock.request('screen'); }catch{} };
-  const unlockScreen = () => { try{ wake && wake.release(); }catch{} wake = null; };
+  const lockScreen = async () => { try{ if('wakeLock' in navigator && document.visibilityState === 'visible') wake = await navigator.wakeLock.request('screen'); }catch{ /* wake lock is optional; refused or unsupported is fine */ } };
+  const unlockScreen = () => { try{ wake && wake.release(); }catch{ /* already released */ } wake = null; };
   const onVis = () => { if(busy && t.long && document.visibilityState === 'visible') lockScreen(); };
   document.addEventListener('visibilitychange', onVis);
   let ctl = null;
@@ -1872,7 +1878,7 @@ function renderTool(t){
   if(cancelBtn) cancelBtn.addEventListener('click', () => {
     if(!ctl || ctl.cancelled) return;
     ctl.cancelled = true; cancelBtn.disabled = true; cancelBtn.textContent = 'Cancelling…';
-    ctl.fns.forEach(fn => { try{ fn(); }catch{} });
+    ctl.fns.forEach(fn => { try{ fn(); }catch{ /* the job may have finished already; cancelling is best effort */ } });
   });
 
   function showError(msg, neutral){
@@ -1987,7 +1993,7 @@ function optHtml(o){
 }
 
 /* =========================================================
-   NO ZOOM — iOS ignores user-scalable=no, so block gestures here
+   NO ZOOM: iOS ignores user-scalable=no, so block gestures here
    ========================================================= */
 ['gesturestart','gesturechange','gestureend'].forEach(ev =>
   document.addEventListener(ev, e => e.preventDefault(), {passive: false}));
@@ -1995,7 +2001,7 @@ document.addEventListener('touchmove', e => { if(e.touches.length > 1 || (e.scal
 /* Double-tap zoom is disabled by touch-action:manipulation in styles.css */
 
 /* =========================================================
-   PWA — offline support + automatic updates
+   PWA: offline support + automatic updates
    - The app checks for a new version every time it's opened or brought back
    - When one is found it reloads itself once, so the home-screen app stays current
    ========================================================= */
