@@ -2,7 +2,7 @@
    Doc Swap: app.js
    Paths are relative to index.html (js/lib, assets/...).
    ========================================================= */
-const APP_VERSION = '5';
+const APP_VERSION = '6';
 
 /* =========================================================
    LIBRARIES: bundled next to index.html, loaded only when a tool needs them
@@ -12,7 +12,6 @@ const LIB = {
   pdflib:   'js/lib/pdf-lib.min.js',
   zip:      'js/lib/jszip.min.js',
   heic:     'js/lib/heic2any.min.js',
-  xlsx:     'js/lib/xlsx.full.min.js',
   media:    'js/lib/mediabunny.min.js',   // video & audio (uses the device's built-in codecs)
   gif:      'js/lib/gifenc.min.js',
   qr:       'js/lib/qrcode.js',
@@ -338,34 +337,20 @@ function wrapText(text, font, size, maxW){
 }
 
 /* ---------- spreadsheets ---------- */
-function uniqueSheetName(name, used){
-  const nm = (name || 'Sheet').replace(/[\\\/?*\[\]:]/g, '').slice(0, 31) || 'Sheet';
-  let k = nm, j = 2;
-  while(used.has(k.toLowerCase())) k = nm.slice(0, 28) + ' ' + j++;
-  used.add(k.toLowerCase());
-  return k;
+/* SheetJS only ever runs inside js/xlsx-worker.js (the note at the top of that file explains why).
+   A fresh worker per job, terminated afterwards, so a file that hangs the parser can be abandoned. */
+const SHEET_TIMEOUT = 120000;
+function sheetJob(op, ...args){
+  return new Promise((resolve, reject) => {
+    const w = new Worker('js/xlsx-worker.js');
+    const finish = () => { clearTimeout(timer); w.terminate(); };
+    const timer = setTimeout(() => { finish(); reject(new Error('This spreadsheet took too long to read. It may be damaged, or too big for this device.')); }, SHEET_TIMEOUT);
+    w.onmessage = ({data}) => { finish(); data.error ? reject(new Error(data.error)) : resolve(data.result); };
+    w.onerror = e => { e.preventDefault(); finish(); reject(new Error('Couldn’t load the spreadsheet converter. Open Doc Swap once while online so it can save itself for offline use, then try again.')); };
+    w.postMessage({op, args});
+  });
 }
-async function readWorkbook(f, opts = {}){
-  const e = extOf(f.name);
-  try{
-    return ['csv','tsv','txt'].includes(e)
-      ? XLSX.read((await f.text()).replace(/^﻿/, ''), {type: 'string', ...opts})
-      : XLSX.read(await f.arrayBuffer(), opts);
-  }catch{ throw new Error(`Couldn’t read “${f.name}” as a spreadsheet.`); }
-}
-function jsonToSheet(data){
-  const flat = v => v !== null && typeof v === 'object' ? JSON.stringify(v) : v;
-  const flatRow = r => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, flat(v)]));
-  const isObj = v => v && typeof v === 'object' && !Array.isArray(v);
-  if(Array.isArray(data)){
-    if(!data.length) return XLSX.utils.aoa_to_sheet([[]]);
-    if(data.every(Array.isArray)) return XLSX.utils.aoa_to_sheet(data.map(r => r.map(flat)));
-    if(data.every(isObj)) return XLSX.utils.json_to_sheet(data.map(flatRow));
-    return XLSX.utils.aoa_to_sheet(data.map(v => [flat(v)]));
-  }
-  if(isObj(data)) return XLSX.utils.json_to_sheet([flatRow(data)]);
-  return XLSX.utils.aoa_to_sheet([[flat(data)]]);
-}
+const csvBlob = s => textBlob(s, 'text/csv;charset=utf-8');
 
 /* ---------- long jobs: cancelling ---------- */
 class Cancelled extends Error { constructor(){ super('Cancelled.'); this.cancelled = true; } }
@@ -1333,13 +1318,12 @@ const TOOLS = [
   desc:'Save each sheet of a spreadsheet as a CSV file.',
   icon: conv('XLSX', C.xls, 'CSV', C.csv),
   async run(files, o, p){
-    p(0, 'Loading converter');
-    await need('xlsx');
-    const f = files[0], wb = await readWorkbook(f);
-    const many = wb.SheetNames.length > 1;
-    return wb.SheetNames.map(n => ({
-      blob: textBlob('﻿' + XLSX.utils.sheet_to_csv(wb.Sheets[n]), 'text/csv;charset=utf-8'),
-      name: many ? `${baseName(f.name)}-${n.replace(/[^\w\- ]+/g, '').trim() || 'sheet'}.csv` : `${baseName(f.name)}.csv`
+    p(0, 'Reading spreadsheet');
+    const f = files[0], sheets = await sheetJob('workbookToCsv', f);
+    const many = sheets.length > 1;
+    return sheets.map(({name, csv}) => ({
+      blob: csvBlob(csv),
+      name: many ? `${baseName(f.name)}-${name.replace(/[^\w\- ]+/g, '').trim() || 'sheet'}.csv` : `${baseName(f.name)}.csv`
     }));
   }
 },
@@ -1348,14 +1332,8 @@ const TOOLS = [
   desc:'Turn CSV files into an Excel workbook (one sheet per file).',
   icon: conv('CSV', C.csv, 'XLSX', C.xls),
   async run(files, o, p){
-    p(0, 'Loading converter');
-    await need('xlsx');
-    const wb = XLSX.utils.book_new(), used = new Set();
-    for(const f of files){
-      const tmp = await readWorkbook(f);
-      XLSX.utils.book_append_sheet(wb, tmp.Sheets[tmp.SheetNames[0]], uniqueSheetName(baseName(f.name), used));
-    }
-    const out = XLSX.write(wb, {bookType: 'xlsx', type: 'array'});
+    p(0, 'Building workbook');
+    const out = await sheetJob('csvFilesToXlsx', files, files.map(f => baseName(f.name)));
     return [{blob: new Blob([out], {type: MIME.xlsx}), name: `${baseName(files[0].name)}.xlsx`}];
   }
 },
@@ -1365,14 +1343,8 @@ const TOOLS = [
   icon: conv('XLSX', C.xls, 'JSON', C.json),
   options:[{key:'shape', label:'JSON layout', type:'select', value:'objects', choices:[['objects','List of objects (first row = keys)'],['rows','List of rows (arrays)']]}],
   async run(files, o, p){
-    p(0, 'Loading converter');
-    await need('xlsx');
-    const f = files[0], wb = await readWorkbook(f, {cellDates: true});
-    const conv = ws => o.shape === 'rows'
-      ? XLSX.utils.sheet_to_json(ws, {header: 1, defval: '', blankrows: false})
-      : XLSX.utils.sheet_to_json(ws, {defval: '', blankrows: false});
-    const names = wb.SheetNames;
-    const data = names.length === 1 ? conv(wb.Sheets[names[0]]) : Object.fromEntries(names.map(n => [n, conv(wb.Sheets[n])]));
+    p(0, 'Reading spreadsheet');
+    const f = files[0], data = await sheetJob('workbookToJson', f, o.shape);
     return [{blob: textBlob(JSON.stringify(data, null, 2), 'application/json'), name: `${baseName(f.name)}.json`}];
   }
 },
@@ -1382,23 +1354,22 @@ const TOOLS = [
   icon: conv('JSON', C.json, 'XLSX', C.xls),
   options:[{key:'to', label:'Convert to', type:'select', value:'xlsx', choices:[['xlsx','Excel (.xlsx)'],['csv','CSV']]}],
   async run(files, o, p){
-    p(0, 'Loading converter');
-    await need('xlsx');
+    p(0, 'Reading JSON');
     const f = files[0];
     let data;
     try{ data = JSON.parse((await f.text()).replace(/^﻿/, '')); }
     catch(e){ throw new Error(`“${f.name}” isn’t valid JSON. ${e.message || ''}`.trim()); }
     const multi = data && typeof data === 'object' && !Array.isArray(data) && Object.keys(data).length > 1 && Object.values(data).every(Array.isArray);
     const sheets = multi ? Object.entries(data) : [[baseName(f.name), data]];
+    p(.3, 'Building spreadsheet');
     if(o.to === 'csv'){
-      return sheets.map(([n, v]) => ({
-        blob: textBlob('﻿' + XLSX.utils.sheet_to_csv(jsonToSheet(v)), 'text/csv;charset=utf-8'),
+      const csvs = await sheetJob('jsonToCsv', sheets);
+      return sheets.map(([n], i) => ({
+        blob: csvBlob(csvs[i]),
         name: multi ? `${baseName(f.name)}-${safeFileName(n) || 'sheet'}.csv` : `${baseName(f.name)}.csv`
       }));
     }
-    const wb = XLSX.utils.book_new(), used = new Set();
-    sheets.forEach(([n, v]) => XLSX.utils.book_append_sheet(wb, jsonToSheet(v), uniqueSheetName(n, used)));
-    return [{blob: new Blob([XLSX.write(wb, {bookType: 'xlsx', type: 'array'})], {type: MIME.xlsx}), name: `${baseName(f.name)}.xlsx`}];
+    return [{blob: new Blob([await sheetJob('jsonToXlsx', sheets)], {type: MIME.xlsx}), name: `${baseName(f.name)}.xlsx`}];
   }
 },
 {
@@ -1407,25 +1378,23 @@ const TOOLS = [
   icon: pair('CSV', C.csv, G.plus),
   options:[{key:'source', label:'Add a column showing which file each row came from?', type:'select', value:'no', choices:[['no','No'],['yes','Yes']]}],
   async run(files, o, p){
-    p(0, 'Loading converter');
-    await need('xlsx');
     const header = [], rows = [];
     for(const [i, f] of files.entries()){
       p(i / files.length, `Reading ${f.name}`);
-      const wb = await readWorkbook(f, {raw: true});
-      const aoa = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {header: 1, raw: false, defval: '', blankrows: false});
+      const aoa = await sheetJob('csvRows', f);
       if(!aoa.length) continue;
       const h = aoa[0].map(c => String(c).trim());
       h.forEach(c => { if(!header.includes(c)) header.push(c); });
       for(const r of aoa.slice(1)){
-        const obj = {}; h.forEach((c, k) => { if(!(c in obj)) obj[c] = r[k] ?? ''; });
+        // no prototype, so a column named "__proto__" or "constructor" is just a column
+        const obj = Object.create(null); h.forEach((c, k) => { if(!(c in obj)) obj[c] = r[k] ?? ''; });
         rows.push({obj, src: f.name});
       }
     }
     if(!header.length) throw new Error('These CSV files are empty.');
     const src = o.source === 'yes';
     const aoa = [src ? [...header, 'Source file'] : header, ...rows.map(r => header.map(c => r.obj[c] ?? '').concat(src ? [r.src] : []))];
-    const res = [{blob: textBlob('﻿' + XLSX.utils.sheet_to_csv(XLSX.utils.aoa_to_sheet(aoa)), 'text/csv;charset=utf-8'), name: `${baseName(files[0].name)}-merged.csv`}];
+    const res = [{blob: csvBlob(await sheetJob('rowsToCsv', aoa)), name: `${baseName(files[0].name)}-merged.csv`}];
     res.note = `${rows.length} row${rows.length === 1 ? '' : 's'} from ${files.length} files, ${header.length} column${header.length === 1 ? '' : 's'}.`;
     return res;
   }
