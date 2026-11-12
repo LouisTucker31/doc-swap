@@ -2,7 +2,7 @@
    Doc Swap: app.js
    Paths are relative to index.html (js/lib, assets/...).
    ========================================================= */
-const APP_VERSION = '6';
+const APP_VERSION = '7';
 
 /* =========================================================
    LIBRARIES: bundled next to index.html, loaded only when a tool needs them
@@ -463,6 +463,85 @@ function hasAlpha(c){
   for(let i = 3; i < d.length; i += 4) if(d[i] < 255) return true;
   return false;
 }
+
+/* ---------- speech to text (the engine itself runs in js/transcribe-worker.js) ---------- */
+const SPEECH_RATE = 16000, SPEECH_MAX_S = 2 * 3600;
+
+/* Decode a recording's sound to 16 kHz mono, which is what Whisper expects.
+   Mediabunny streams it in pieces so long files don't need the whole decoded file in memory;
+   browsers without WebCodecs fall back to decodeAudioData, which resamples for us. */
+async function speechAudio(f, p){
+  let M = null;
+  try{ M = await media(); }catch{ /* no WebCodecs: use the fallback below */ }
+  if(M){
+    const input = await openMedia(f), at = await input.getPrimaryAudioTrack();
+    if(!at) throw new Error(`“${f.name}” has no sound in it.`);
+    if(!(await at.canDecode())) throw new Error('This device can’t read the sound in this file. Try converting it to MP3 with the Audio converter first.');
+    const dur = await at.computeDuration();
+    if(dur > SPEECH_MAX_S) throw new Error(`This recording is ${fmtDur(dur)} long. Transcribe works on recordings up to 2 hours.`);
+    const out = new Float32Array(Math.ceil(dur * SPEECH_RATE) + SPEECH_RATE);
+    for await (const {buffer, timestamp} of new M.AudioBufferSink(at).buffers()){
+      const sr = buffer.sampleRate, n = buffer.length, ch = buffer.numberOfChannels, mono = new Float32Array(n);
+      for(let c = 0; c < ch; c++){ const d = buffer.getChannelData(c); for(let i = 0; i < n; i++) mono[i] += d[i] / ch; }
+      // average the source samples that fall inside each 1/16000 s slot (a simple anti-alias filter)
+      const first = Math.max(0, Math.ceil(timestamp * SPEECH_RATE)), last = Math.min(out.length, Math.floor((timestamp + n / sr) * SPEECH_RATE));
+      for(let j = first; j < last; j++){
+        const a = Math.max(0, Math.floor((j / SPEECH_RATE - timestamp) * sr)), b = Math.min(n, Math.max(a + 1, Math.floor(((j + 1) / SPEECH_RATE - timestamp) * sr)));
+        let s = 0; for(let i = a; i < b; i++) s += mono[i];
+        out[j] = s / (b - a);
+      }
+      p(Math.min(.1, timestamp / dur * .1), 'Reading the sound');
+    }
+    return out.subarray(0, Math.ceil(dur * SPEECH_RATE));
+  }
+  let decoded;
+  try{ decoded = await new OfflineAudioContext(1, 1, SPEECH_RATE).decodeAudioData(await f.arrayBuffer()); }
+  catch{ throw new Error(`Couldn’t read the sound in “${f.name}”. Try converting it to MP3 with the Audio converter first.`); }
+  if(decoded.duration > SPEECH_MAX_S) throw new Error(`This recording is ${fmtDur(decoded.duration)} long. Transcribe works on recordings up to 2 hours.`);
+  const out = new Float32Array(decoded.length);
+  for(let c = 0; c < decoded.numberOfChannels; c++){ const d = decoded.getChannelData(c); for(let i = 0; i < out.length; i++) out[i] += d[i] / decoded.numberOfChannels; }
+  return out;
+}
+
+/* Split into ~2 minute sections (so progress and Cancel work), cutting at the quietest moment
+   near each boundary so words aren't chopped. Near-silent sections are dropped, because Whisper
+   tends to invent words ("Thank you.") when it hears nothing. */
+function speechSections(audio){
+  const R = SPEECH_RATE, target = 120 * R, search = 4 * R, win = R / 10, sections = [];
+  const rms = (a, b) => { let s = 0; for(let i = a; i < b; i++) s += audio[i] * audio[i]; return Math.sqrt(s / Math.max(1, b - a)); };
+  let start = 0;
+  while(start < audio.length){
+    let end = Math.min(audio.length, start + target);
+    if(end < audio.length){
+      let best = end, quiet = Infinity;
+      for(let c = end - search; c < Math.min(audio.length - win, end + search); c += win){ const v = rms(c, c + win); if(v < quiet){ quiet = v; best = c + win / 2; } }
+      end = Math.round(best);
+    }
+    if(rms(start, end) > .002) sections.push([start, end]);
+    start = end;
+  }
+  return sections;
+}
+
+function transcribeJob({audio, sections, model, language, p, ctl}){
+  return new Promise((resolve, reject) => {
+    const w = new Worker('js/transcribe-worker.js', {type: 'module'});
+    if(ctl) ctl.onCancel(() => { w.terminate(); reject(new Cancelled()); });
+    w.onmessage = ({data: m}) => {
+      if(m.type === 'download') p(.1 + .2 * m.loaded / m.total, `Downloading the speech model, one time only (${fmt(m.loaded)} of ${fmt(m.total)})`);
+      else if(m.type === 'ready') p(.3, `Listening (section 1 of ${sections.length})`);
+      else if(m.type === 'section') p(.3 + .7 * m.done / m.total, m.done < m.total ? `Listening (section ${m.done + 1} of ${m.total})` : 'Writing the transcript');
+      else { w.terminate(); m.type === 'done' ? resolve(m) : reject(new Error(m.message)); }
+    };
+    w.onerror = e => { e.preventDefault(); w.terminate(); reject(new Error('This browser couldn’t start the speech engine. Update it, or try Chrome, Edge or Safari.')); };
+    w.postMessage({audio, sections, model, language}, [audio.buffer]);
+  });
+}
+
+const srtTime = s => { const ms = Math.max(0, Math.round(s * 1000)), h = Math.floor(ms / 3600000), m = Math.floor(ms / 60000) % 60, sec = Math.floor(ms / 1000) % 60; return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')},${String(ms % 1000).padStart(3, '0')}`; };
+const toSrt = chunks => chunks.map((c, i) => `${i + 1}\n${srtTime(c.start)} --> ${srtTime(Math.max(c.end, c.start + .5))}\n${c.text}\n`).join('\n');
+// a new paragraph wherever the speaker pauses for more than two seconds
+const toParagraphs = chunks => chunks.reduce((out, c, i) => out + (i === 0 ? '' : c.start - chunks[i - 1].end > 2 ? '\n\n' : ' ') + c.text, '');
 
 /* ---------- codes & links ---------- */
 function qrMatrix(text, ecc = 'M'){
@@ -1308,6 +1387,39 @@ const TOOLS = [
     const res = [{blob, name: `${baseName(f.name)}.gif`}];
     res.note = `${gw}×${gh} px, ${(end - start).toFixed(1).replace(/\.0$/, '')} seconds, ${k} frames`;
     res.previewImg = blob;
+    return res;
+  }
+},
+
+{
+  id:'transcribe', name:'Transcribe audio', cats:['video','data'], exts:[...VIDEO_EXTS, ...AUDIO_EXTS], label:'videos or audio (MP4, MOV, MP3, M4A, WAV…)', long:true, verb:'Transcribe',
+  desc:'Turn the speech in a video or audio file into text, plus a subtitle file (.srt) with timings.',
+  note:'The first time, this downloads a speech model (roughly 60 to 200 MB, depending on the options) and keeps it for next time. Your recording never leaves your device.',
+  icon: conv('MP3', C.mp3, 'TXT', C.txt),
+  options:[
+    {key:'lang', label:'Spoken language', type:'select', value:'english', choices:[['english','English'],['french','French'],['german','German'],['spanish','Spanish'],['italian','Italian'],['portuguese','Portuguese'],['dutch','Dutch'],['polish','Polish'],['welsh','Welsh'],['romanian','Romanian'],['russian','Russian'],['ukrainian','Ukrainian'],['turkish','Turkish'],['arabic','Arabic'],['urdu','Urdu'],['hindi','Hindi'],['punjabi','Punjabi'],['chinese','Chinese'],['japanese','Japanese'],['korean','Korean']]},
+    {key:'quality', label:'Accuracy', type:'select', value:'fast', choices:[['fast','Quick (smaller download)'],['better','More accurate (bigger download, slower)']]}
+  ],
+  hint:'For languages other than English, choose More accurate. Speech recognition gets names and numbers wrong sometimes, so check anything important.',
+  async run(files, o, p, ctl){
+    const f = files[0];
+    p(0, 'Reading the sound');
+    const audio = await speechAudio(f, p), dur = audio.length / SPEECH_RATE;
+    checkCancel(ctl);
+    const sections = speechSections(audio);
+    if(!sections.length) throw new Error('No speech was found. The recording seems to be silent.');
+    const english = o.lang === 'english', size = o.quality === 'better' ? 'base' : 'tiny';
+    const t0 = performance.now();
+    const {chunks, device} = await transcribeJob({audio, sections, model: `onnx-community/whisper-${size}${english ? '.en' : ''}`, language: english ? null : o.lang, p, ctl});
+    if(!chunks.length) throw new Error('No speech could be made out in this recording.');
+    const text = toParagraphs(chunks), words = text.split(/\s+/).filter(Boolean).length;
+    const res = [
+      {blob: textBlob(text + '\n'), name: `${baseName(f.name)}-transcript.txt`, copy: text},
+      {blob: textBlob(toSrt(chunks), 'application/x-subrip;charset=utf-8'), name: `${baseName(f.name)}.srt`}
+    ];
+    res.copyLabel = 'Copy transcript';
+    res.previewHtml = `<pre class="code">${escH(text.length > 1500 ? text.slice(0, 1500) + '…' : text)}</pre>`;
+    res.note = `${fmtDur(dur)} of audio, ${words} word${words === 1 ? '' : 's'}, done in ${fmtDur((performance.now() - t0) / 1000)}${device === 'webgpu' ? ' using your graphics chip' : ''}. The .srt file adds subtitles in most video players and editors.`;
     return res;
   }
 },
