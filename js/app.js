@@ -1,25 +1,25 @@
 /* =========================================================
    DOC SWAP — app.js
-   All files live in the same folder as index.html.
+   Paths are relative to index.html (js/lib, assets/...).
    ========================================================= */
-const APP_VERSION = '4';
+const APP_VERSION = '5';
 
 /* =========================================================
    LIBRARIES — bundled next to index.html, loaded only when a tool needs them
    ========================================================= */
 const LIB = {
-  pdfjs:    'pdf.min.js',
-  pdflib:   'pdf-lib.min.js',
-  zip:      'jszip.min.js',
-  heic:     'heic2any.min.js',
-  xlsx:     'xlsx.full.min.js',
-  media:    'mediabunny.min.js',   // video & audio (uses the device's built-in codecs)
-  gif:      'gifenc.min.js',
-  qr:       'qrcode.js',
-  barcode:  'jsbarcode.min.js',
-  tf:       'tf.min.js'            // AI upscaler
+  pdfjs:    'js/lib/pdf.min.js',
+  pdflib:   'js/lib/pdf-lib.min.js',
+  zip:      'js/lib/jszip.min.js',
+  heic:     'js/lib/heic2any.min.js',
+  xlsx:     'js/lib/xlsx.full.min.js',
+  media:    'js/lib/mediabunny.min.js',   // video & audio (uses the device's built-in codecs)
+  gif:      'js/lib/gifenc.min.js',
+  qr:       'js/lib/qrcode.js',
+  barcode:  'js/lib/jsbarcode.min.js',
+  tf:       'js/lib/tf.min.js'            // AI upscaler
 };
-const PDFJS_WORKER = 'pdf.worker.min.js';
+const PDFJS_WORKER = 'js/lib/pdf.worker.min.js';
 const _loading = {};
 function loadScript(src){
   if(!_loading[src]) _loading[src] = new Promise((res, rej) => {
@@ -45,7 +45,7 @@ const extOf = n => (n.match(/\.([^.]+)$/) || [,''])[1].toLowerCase();
 const escH = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt = b => b < 1024 ? b + ' B' : b < 1048576 ? (b/1024).toFixed(0) + ' KB' : (b/1048576).toFixed(1) + ' MB';
 const tick = () => new Promise(r => setTimeout(r, 0));
-const canvasToBlob = (c, type, q) => new Promise((res, rej) => c.toBlob(b => b ? res(b) : rej(new Error('Image export failed — the file may be too large for this device.')), type, q));
+const canvasToBlob = (c, type, q) => new Promise((res, rej) => c.toBlob(b => b ? res(b) : rej(new Error('Image export failed. The file may be too large for this device.')), type, q));
 const pdfBlob = bytes => new Blob([bytes], {type: 'application/pdf'});
 const textBlob = (s, type = 'text/plain;charset=utf-8') => new Blob([s], {type});
 const EXT_FOR = {'image/jpeg':'jpg','image/png':'png','image/webp':'webp'};
@@ -413,7 +413,7 @@ async function convertMedia({input, format, video, audio, p, ctl, label, needs})
   const used = conv.utilizedTracks.map(t => t.type);
   if(!conv.isValid || (needs && !used.includes(needs))){
     const d = lost.find(x => !needs || x.track.type === needs) || lost[0];
-    throw new Error(`This file can’t be converted on this device${d ? `: the ${d.track.type} — ${WHY[d.reason] || d.reason}` : ''}.`);
+    throw new Error(`This file can’t be converted on this device${d ? ` (the ${d.track.type}: ${WHY[d.reason] || d.reason})` : ''}.`);
   }
   if(ctl) ctl.onCancel(() => conv.cancel());
   conv.onProgress = v => p(v, label);
@@ -442,7 +442,7 @@ async function upscaleCanvas(src, scale, p, ctl){
   await tf.ready();
   p(0, 'Loading the AI model');
   if(!_models[scale]){
-    try{ _models[scale] = await tf.loadLayersModel(`upscale-x${scale}.json`); }
+    try{ _models[scale] = await tf.loadLayersModel(`assets/models/upscale-x${scale}.json`); }
     catch{ throw new Error('Couldn’t load the AI model. Open Doc Swap once while online so it can save it for offline use.'); }
   }
   const model = _models[scale];
@@ -1690,6 +1690,26 @@ const TOOLS = [
 
 const CATS = [['all','All tools'],['pdf','PDF'],['images','Images'],['video','Video & audio'],['data','Docs & data'],['web','Web & links'],['files','Files']];
 
+/* Small interface icons (drawn, not text characters) */
+const UI = (d, w = 2) => `<svg class="ui" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${d}"/></svg>`;
+const I = {
+  back: UI('M15 18l-6-6 6-6'),
+  up: UI('M12 19V5M6 11l6-6 6 6'),
+  down: UI('M12 5v14M6 13l6 6 6-6'),
+  x: UI('M6 6l12 12M18 6L6 18'),
+  warn: UI('M12 3.5 2.5 20h19L12 3.5zM12 10v4.5M12 17.2v.1'),
+  info: UI('M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 11v5M12 7.8v.1'),
+  device: UI('M8 2.8h8a2 2 0 0 1 2 2v14.4a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V4.8a2 2 0 0 1 2-2zM11 18h2', 1.8),
+  cloudOff: UI('M3 3l18 18M8.5 8.6A5 5 0 0 0 6.5 18H17M19.6 16.4A4 4 0 0 0 17 9h-.5A6.5 6.5 0 0 0 9.8 4.3', 1.8)
+};
+/* Success badge: the output file type with a small tick */
+function doneIcon(name){
+  const e = (extOf(name) || 'file').slice(0, 4).toUpperCase();
+  const col = {PDF:C.pdf, JPG:C.jpg, JPEG:C.jpg, PNG:C.png, WEBP:C.webp, GIF:C.gif, SVG:C.svg, ICO:C.ico, MP4:C.mp4, MOV:C.mov, WEBM:C.mp4, MKV:C.mp4,
+    MP3:C.mp3, M4A:C.mp3, WAV:C.mp3, XLSX:C.xls, CSV:C.csv, JSON:C.json, TXT:C.txt, ZIP:C.zip, HTML:C.html, DOCX:C.doc}[e] || C.txt;
+  return `<svg class="done-ico" viewBox="0 0 40 46" aria-hidden="true">${doc(4, 2, e, col)}<g transform="translate(31 36)"><circle r="8" fill="var(--ok)" stroke="var(--surface)" stroke-width="2.5"/><path d="M-3.4 .2l2.3 2.3 4.6-4.8" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g></svg>`;
+}
+
 /* =========================================================
    ROUTER + VIEWS
    ========================================================= */
@@ -1710,22 +1730,30 @@ addEventListener('hashchange', route);
 addEventListener('scroll', () => $('#top').classList.toggle('scrolled', scrollY > 4), {passive: true});
 
 function renderHome(){
-  document.title = 'Doc Swap — convert files on your device';
+  document.title = 'Doc Swap';
   app.innerHTML = `
     <section class="hero">
-      <h1>Every file, in the format you need.</h1>
-      <p>Convert, merge and tidy documents and images in seconds. Everything happens on your device, so nothing gets uploaded.</p>
+      <h1>What are we converting today?</h1>
+      <p>${TOOLS.filter(t => !t.disabled).length} tools for PDFs, photos, video, spreadsheets and links. Your files stay on this device.</p>
     </section>
     <div class="chips" role="group" aria-label="Filter tools">
       ${CATS.map(([v, l]) => `<button class="chip" data-cat="${v}" aria-pressed="${v === filter}">${l}</button>`).join('')}
     </div>
-    <nav class="grid" id="grid" aria-label="Tools"></nav>`;
+    <nav id="grid" aria-label="Tools"></nav>`;
+  const tile = t => t.disabled
+    ? `<div class="tile off" aria-disabled="true" title="Coming soon">${t.icon}<span>${t.name}</span><em class="soon">Soon</em></div>`
+    : `<a class="tile" href="#/${t.id}">${t.icon}<span>${t.name}</span></a>`;
   const draw = () => {
-    const list = TOOLS.filter(t => filter === 'all' || t.cats.includes(filter));
-    const ordered = [...list.filter(t => !t.disabled), ...list.filter(t => t.disabled)];
-    $('#grid').innerHTML = ordered.map(t => t.disabled
-      ? `<div class="tile off" aria-disabled="true" title="Coming soon">${t.icon}<span>${t.name}</span><em class="soon">Soon</em></div>`
-      : `<a class="tile" href="#/${t.id}">${t.icon}<span>${t.name}</span></a>`).join('');
+    if(filter === 'all'){
+      // "All tools" is split into sections; each tool appears once, under its main category
+      $('#grid').innerHTML = CATS.filter(([v]) => v !== 'all').map(([v, l]) => {
+        const list = TOOLS.filter(t => t.cats[0] === v && !t.disabled);
+        return list.length ? `<section class="group"><h2>${l}<span>${list.length}</span></h2><div class="grid">${list.map(tile).join('')}</div></section>` : '';
+      }).join('');
+    } else {
+      const list = TOOLS.filter(t => t.cats.includes(filter) && !t.disabled);
+      $('#grid').innerHTML = `<div class="grid">${list.map(tile).join('')}</div>`;
+    }
   };
   app.querySelector('.chips').addEventListener('click', e => {
     const b = e.target.closest('.chip'); if(!b) return;
@@ -1737,7 +1765,7 @@ function renderHome(){
 }
 
 function renderTool(t){
-  document.title = `${t.name} — Doc Swap`;
+  document.title = `${t.name} · Doc Swap`;
   const anyFile = t.exts === '*';
   const exts = anyFile || !t.exts ? [] : t.exts;
   const accept = anyFile ? '' : exts.map(e => '.' + e).join(',')
@@ -1751,7 +1779,7 @@ function renderTool(t){
 
   app.innerHTML = `
   <div class="tool">
-    <a class="back" href="#/">← All tools</a>
+    <a class="back" href="#/">${I.back}All tools</a>
     <div class="tool-head">
       <div class="ico">${t.icon}</div>
       <div><h1>${t.name}</h1><p>${escH(t.desc)}</p></div>
@@ -1787,8 +1815,8 @@ function renderTool(t){
   function drawFiles(){
     list.innerHTML = files.map((f, i) => `<li>
       <span class="n">${escH(f.name)}</span><span class="s">${fmt(f.size)}</span>
-      ${t.multiple && files.length > 1 ? `<button class="iconbtn" data-a="up" data-i="${i}" aria-label="Move up" ${i === 0 ? 'disabled' : ''}>↑</button><button class="iconbtn" data-a="down" data-i="${i}" aria-label="Move down" ${i === files.length - 1 ? 'disabled' : ''}>↓</button>` : ''}
-      <button class="iconbtn" data-a="rm" data-i="${i}" aria-label="Remove">✕</button></li>`).join('');
+      ${t.multiple && files.length > 1 ? `<button class="iconbtn" data-a="up" data-i="${i}" aria-label="Move up" ${i === 0 ? 'disabled' : ''}>${I.up}</button><button class="iconbtn" data-a="down" data-i="${i}" aria-label="Move down" ${i === files.length - 1 ? 'disabled' : ''}>${I.down}</button>` : ''}
+      <button class="iconbtn" data-a="rm" data-i="${i}" aria-label="Remove">${I.x}</button></li>`).join('');
     go.disabled = busy || (!t.noFile && files.length < minFiles);
     go.textContent = !t.noFile && files.length && files.length < minFiles ? `Add at least ${minFiles} files` : (t.verb || 'Convert');
   }
@@ -1849,7 +1877,7 @@ function renderTool(t){
 
   function showError(msg, neutral){
     result.hidden = false;
-    result.innerHTML = `<div class="err${neutral ? ' neutral' : ''}"><span>${neutral ? 'ⓘ' : '⚠'}</span><span>${escH(msg)}</span></div>`;
+    result.innerHTML = `<div class="err${neutral ? ' neutral' : ''}">${neutral ? I.info : I.warn}<span>${escH(msg)}</span></div>`;
   }
   function showResult(out){
     revokeAll();
@@ -1866,7 +1894,7 @@ function renderTool(t){
     else if(out.previewHtml) preview = `<div class="preview html">${out.previewHtml}</div>`;
     result.hidden = false;
     result.innerHTML = `
-      <div class="done"><span class="tick">✓</span><div>
+      <div class="done">${doneIcon(items[0].name)}<div>
         <strong>${one ? 'Your file is ready' : `${items.length} files ready`}</strong>
         <small>${one ? `${escH(one.name)} · ${one.from ? fmt(one.from) + ' → ' : ''}${fmt(one.blob.size)}` : fmt(total) + ' in total'}${saved}</small>
       </div></div>
@@ -1890,13 +1918,13 @@ function renderTool(t){
       const label = cp.textContent;
       try{
         await navigator.clipboard.writeText(copyItem.copy);
-        cp.textContent = 'Copied ✓';
+        cp.textContent = 'Copied';
       }catch{
         const ta = document.createElement('textarea');
         ta.value = copyItem.copy; ta.setAttribute('readonly', ''); ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;font-size:16px';
         document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, ta.value.length);
         const okc = document.execCommand && document.execCommand('copy'); ta.remove();
-        cp.textContent = okc ? 'Copied ✓' : 'Couldn’t copy. Use Download instead.';
+        cp.textContent = okc ? 'Copied' : 'Couldn’t copy. Use Download instead.';
       }
       setTimeout(() => { cp.textContent = label; }, 2000);
     });
@@ -2002,6 +2030,9 @@ async function checkForUpdates(btn){
     setTimeout(() => { btn.textContent = label; btn.disabled = false; }, 2500);
   }
 }
+const net = $('#net');
+const showNet = () => { if(!net) return; const on = navigator.onLine !== false; net.classList.toggle('offline', !on); net.innerHTML = on ? `${I.device}On-device` : `${I.cloudOff}Offline, still works`; };
+addEventListener('online', showNet); addEventListener('offline', showNet); showNet();
 const updBtn = $('#update');
 if(updBtn){
   updBtn.addEventListener('click', () => checkForUpdates(updBtn));

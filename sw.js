@@ -4,36 +4,36 @@
      fetched fresh when you're online, so pushing to GitHub is enough. Just reopen the app,
      or tap "Check for updates" in the footer.
    - If you change a library or icon file, also bump VERSION so the saved copies are replaced. */
-const VERSION = 'docswap-v4';
+const VERSION = 'docswap-v5';
 
-const CORE = ['./', './index.html', './app.js', './styles.css', './manifest.webmanifest'];
+const CORE = ['./', './index.html', './js/app.js', './css/styles.css', './manifest.webmanifest'];
 const ASSETS = [
   ...CORE,
-  './icon.svg',
-  './apple-touch-icon.png',
-  './favicon-32.png',
-  './icon-192.png',
-  './icon-512.png',
-  './maskable-512.png',
-  './jakarta-500.woff2',
-  './jakarta-600.woff2',
-  './jakarta-700.woff2',
-  './jakarta-800.woff2',
-  './pdf.min.js',
-  './pdf.worker.min.js',
-  './pdf-lib.min.js',
-  './jszip.min.js',
-  './heic2any.min.js',
-  './xlsx.full.min.js',
-  './mediabunny.min.js',
-  './gifenc.min.js',
-  './qrcode.js',
-  './jsbarcode.min.js',
-  './tf.min.js',
-  './upscale-x2.json',
-  './upscale-x2.bin',
-  './upscale-x4.json',
-  './upscale-x4.bin'
+  './assets/icons/icon.svg',
+  './assets/icons/apple-touch-icon.png',
+  './assets/icons/favicon-32.png',
+  './assets/icons/icon-192.png',
+  './assets/icons/icon-512.png',
+  './assets/icons/maskable-512.png',
+  './assets/fonts/jakarta-500.woff2',
+  './assets/fonts/jakarta-600.woff2',
+  './assets/fonts/jakarta-700.woff2',
+  './assets/fonts/jakarta-800.woff2',
+  './js/lib/pdf.min.js',
+  './js/lib/pdf.worker.min.js',
+  './js/lib/pdf-lib.min.js',
+  './js/lib/jszip.min.js',
+  './js/lib/heic2any.min.js',
+  './js/lib/xlsx.full.min.js',
+  './js/lib/mediabunny.min.js',
+  './js/lib/gifenc.min.js',
+  './js/lib/qrcode.js',
+  './js/lib/jsbarcode.min.js',
+  './js/lib/tf.min.js',
+  './assets/models/upscale-x2.json',
+  './assets/models/upscale-x2.bin',
+  './assets/models/upscale-x4.json',
+  './assets/models/upscale-x4.bin'
 ];
 const CORE_PATHS = new Set(CORE.map(p => new URL(p, self.location).pathname));
 

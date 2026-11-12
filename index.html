@@ -5,7 +5,7 @@
 <!-- Zoom locked: maximum-scale + user-scalable=no (gestures also blocked in app.js for iOS) -->
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Doc Swap</title>
-<meta name="description" content="Convert, merge and tidy PDFs, Word, Excel and images on your device. Nothing gets uploaded.">
+<meta name="description" content="Convert PDFs, photos, video, spreadsheets and links on your device. Nothing gets uploaded.">
 
 <!-- PWA -->
 <link rel="manifest" href="manifest.webmanifest">
@@ -18,14 +18,14 @@
 <meta name="apple-mobile-web-app-title" content="Doc Swap">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="format-detection" content="telephone=no">
-<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="apple-touch-icon" href="assets/icons/apple-touch-icon.png">
 
 <!-- Favicons -->
-<link rel="icon" type="image/svg+xml" href="icon.svg">
-<link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+<link rel="icon" type="image/svg+xml" href="assets/icons/icon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="assets/icons/favicon-32.png">
 
-<link rel="preload" href="jakarta-700.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="styles.css">
+<link rel="preload" href="assets/fonts/jakarta-700.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
 <header class="top" id="top">
@@ -37,17 +37,17 @@
       </svg>
       <span>Doc Swap</span>
     </a>
-    <span class="pill"><i></i>On-device</span>
+    <span class="pill" id="net">On-device</span>
   </div>
 </header>
 
 <main class="wrap" id="app"></main>
 
 <footer>
-  Files are processed on your device and never uploaded.
-  <div class="foot-row"><button class="linkbtn" id="update" type="button">Check for updates</button><span id="version"></span></div>
+  <div class="foot-row"><button class="linkbtn" id="update" type="button">Check for updates</button></div>
+  <p class="sig">Doc Swap <span id="version"></span> · made by Louis · files never leave your device</p>
 </footer>
 
-<script src="app.js"></script>
+<script src="js/app.js"></script>
 </body>
 </html>
