@@ -2,7 +2,7 @@
    Doc Swap: app.js
    Paths are relative to index.html (js/lib, assets/...).
    ========================================================= */
-const APP_VERSION = '7';
+const APP_VERSION = '8';
 
 /* =========================================================
    LIBRARIES: bundled next to index.html, loaded only when a tool needs them
@@ -372,7 +372,7 @@ let mp3Ready = false;
 async function media(){
   await need('media');
   if(typeof VideoEncoder === 'undefined' && typeof AudioDecoder === 'undefined')
-    throw new Error('This browser can’t process video or audio. Update iOS, or try Safari or Chrome on your computer.');
+    throw new Error('This browser can’t process video or audio. Try the latest Chrome, Edge or Safari (on iPhone or iPad, update iOS).');
   if(!mp3Ready){ registerMp3Encoder(); mp3Ready = true; }
   return Mediabunny;
 }
@@ -1175,7 +1175,7 @@ const TOOLS = [
     const W = src.width, H = src.height, max = s === 2 ? 2_600_000 : 900_000;
     if(W * H > max){
       const side = Math.floor(Math.sqrt(max) / 100) * 100;
-      throw new Error(`This image is ${W}×${H} px, which is too big to upscale ${s}× on a phone. Use one up to about ${side}×${side} px (try Resize image first)${s === 4 ? ', or choose 2×' : ''}.`);
+      throw new Error(`This image is ${W}×${H} px, which is too big to upscale ${s}×. Use one up to about ${side}×${side} px (try Resize image first)${s === 4 ? ', or choose 2×' : ''}.`);
     }
     let out = await upscaleCanvas(src, s, p, ctl);
     if(hasAlpha(src)){
@@ -1872,7 +1872,7 @@ function renderTool(t){
       <div><h1>${t.name}</h1><p>${escH(t.desc)}</p></div>
     </div>
     ${t.note ? `<p class="note">${escH(t.note)}</p>` : ''}
-    ${t.long ? `<p class="note keep-open">Keep Doc Swap open on screen while this runs. iPhone pauses web apps in the background, so the screen is kept awake for you.</p>` : ''}
+    ${t.long ? `<p class="note keep-open">Keep this open until it finishes. Phones and tablets pause web apps in the background, so Doc Swap keeps your screen on while it runs.</p>` : ''}
     <label class="drop" id="drop" ${t.noFile ? 'hidden' : ''}>
       <input class="sr" type="file" id="file" ${accept ? `accept="${accept}"` : ''} ${t.multiple ? 'multiple' : ''}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V4m0 0L8 8m4-4 4 4"/><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>

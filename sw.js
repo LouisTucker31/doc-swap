@@ -4,7 +4,7 @@
      fetched fresh when you're online, so pushing to GitHub is enough. Just reopen the app,
      or tap "Check for updates" in the footer.
    - If you change a library or icon file, also bump VERSION so the saved copies are replaced. */
-const VERSION = 'docswap-v7';
+const VERSION = 'docswap-v8';
 
 const CORE = ['./', './index.html', './js/app.js', './js/xlsx-worker.js', './js/transcribe-worker.js', './css/styles.css', './manifest.webmanifest'];
 const ASSETS = [

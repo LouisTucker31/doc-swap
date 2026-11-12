@@ -25,7 +25,7 @@ Convert, merge and tidy PDFs, images, spreadsheets and files on your device. Not
 **Web & links:** QR code maker, Barcode maker, Embed code maker, Link shortener, Favicon maker, Image to Base64
 **Files:** Create ZIP, Extract ZIP, Remove PDF info, Remove photo data
 
-Long jobs (video, audio, AI upscale, transcripts) show a timer and countdown, can be cancelled, and keep the screen awake. iPhone pauses web apps in the background, so keep Doc Swap open while they run.
+Long jobs (video, audio, AI upscale, transcripts) show a timer and countdown, can be cancelled, and keep the screen awake. Phones and tablets pause web apps in the background, so keep Doc Swap open while they run.
 
 Two tools go online:
 - The Link shortener sends the link (never a file) to is.gd, or to your own GitHub repo using a token saved only on your device.
